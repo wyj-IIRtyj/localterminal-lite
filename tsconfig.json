@@ -3,6 +3,8 @@
     "target": "ES2022",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
+    "jsx": "react-jsx",
+    "jsxImportSource": "@opentui/react",
     "lib": ["ES2022"],
     "types": ["node"],
     "strict": true,
@@ -13,5 +15,5 @@
     "rootDir": "src",
     "noEmitOnError": true
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts", "src/**/*.tsx"]
 }

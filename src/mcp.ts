@@ -99,7 +99,7 @@ function contextFromCall(callContext: unknown): InvocationContext {
 }
 
 export function createMcpServer(service: ExtensionService): McpServer {
-  const server = new McpServer({ name: 'localterminal-lite', version: '0.4.2' }, {
+  const server = new McpServer({ name: 'localterminal-lite', version: '0.5.0' }, {
     instructions: [
       'LocalTerminal Lite sessions are auditable work contexts, not ChatGPT conversation IDs.',
       'Before work, create a root with session_register(mode=root), or claim an unfinished/released session with session_inherit(sessionId, claimCode).',
