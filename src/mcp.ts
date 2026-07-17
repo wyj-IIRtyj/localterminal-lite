@@ -15,6 +15,50 @@ const responseSchema = {
   error: z.object({ code: z.string(), message: z.string(), retryable: z.boolean() }).optional(),
 };
 
+const extensionToolInput = z.object({
+  name: z.string().optional(),
+  role: z.string().optional(),
+  session: z.string().optional(),
+  status: z.enum(['active', 'idle', 'blocked', 'completed']).optional(),
+  note: z.string().optional(),
+  from: z.string().optional(),
+  to: z.string().optional(),
+  body: z.string().optional(),
+  markRead: z.boolean().optional(),
+  limit: z.number().int().optional(),
+  path: z.string().optional(),
+  command: z.string().optional(),
+  cwd: z.string().optional(),
+  timeoutSec: z.number().int().optional(),
+}).catchall(z.unknown());
+
+const extensionSpec = z.object({
+  name: z.string(),
+  title: z.string(),
+  description: z.string(),
+  inputSchema: z.object({
+    type: z.literal('object'),
+    properties: z.record(z.string(), z.unknown()),
+    required: z.array(z.string()).optional(),
+    additionalProperties: z.literal(false),
+  }),
+  annotations: z.object({
+    readOnlyHint: z.boolean(),
+    destructiveHint: z.boolean(),
+    openWorldHint: z.boolean(),
+    idempotentHint: z.boolean().optional(),
+  }),
+  handler: z.object({
+    kind: z.enum(['builtin', 'command']),
+    target: z.string().optional(),
+    defaults: extensionToolInput.optional(),
+    executable: z.string().optional(),
+    args: z.array(z.string()).optional(),
+    cwd: z.string().optional(),
+    timeoutSec: z.number().int().optional(),
+  }),
+});
+
 function toToolResult(response: ToolResponse, summary: string) {
   return {
     structuredContent: response as unknown as Record<string, unknown>,
@@ -45,7 +89,7 @@ export function createMcpServer(service: ExtensionService): McpServer {
   server.registerTool('extension_register', {
     title: 'Register or edit extension tool',
     description: 'Validate, upsert, or remove one declarative extension. Validate before upsert. Use extension_discover for the exact registration format.',
-    inputSchema: { action: z.enum(['validate', 'upsert', 'remove']), name: z.string().optional(), spec: z.record(z.string(), z.unknown()).optional(), sessionId: z.string().max(120).optional() },
+    inputSchema: { action: z.enum(['validate', 'upsert', 'remove']), name: z.string().optional(), spec: extensionSpec.optional(), specJson: z.string().optional(), sessionId: z.string().max(120).optional() },
     outputSchema: responseSchema,
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false, idempotentHint: true },
     _meta: { 'openai/toolInvocation/invoking': 'Validating extension…', 'openai/toolInvocation/invoked': 'Extension registry updated' },
@@ -53,8 +97,8 @@ export function createMcpServer(service: ExtensionService): McpServer {
 
   server.registerTool('extension_call', {
     title: 'Call concrete extension tool',
-    description: 'Invoke one builtin or custom extension by exact name. Call extension_discover first for its input schema. This facade can perform consequential operations.',
-    inputSchema: { tool: z.string().min(3).max(64), arguments: z.record(z.string(), z.unknown()), sessionId: z.string().max(120).optional() },
+    description: 'Invoke one builtin or custom extension by exact name. Put tool arguments in input (preferred) or arguments (legacy). Call extension_discover first for its schema.',
+    inputSchema: { tool: z.string().min(3).max(64), input: extensionToolInput.optional(), arguments: extensionToolInput.optional(), inputJson: z.string().optional(), sessionId: z.string().max(120).optional() },
     outputSchema: responseSchema,
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true, idempotentHint: false },
     _meta: { 'openai/toolInvocation/invoking': 'Running extension…', 'openai/toolInvocation/invoked': 'Extension call complete' },

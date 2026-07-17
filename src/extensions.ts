@@ -12,6 +12,23 @@ function objectValue(value: unknown, label: string): JsonObject {
   return value as JsonObject;
 }
 
+function jsonObjectValue(value: unknown, label: string): JsonObject {
+  if (typeof value !== 'string') return objectValue(value, label);
+  try {
+    return objectValue(JSON.parse(value), label);
+  } catch (error) {
+    if (error instanceof SyntaxError) throw new Error(`${label} must contain a valid JSON object.`);
+    throw error;
+  }
+}
+
+function callArguments(input: JsonObject): JsonObject {
+  const legacy = input.arguments === undefined ? {} : jsonObjectValue(input.arguments, 'arguments');
+  const fallback = input.inputJson === undefined ? {} : jsonObjectValue(input.inputJson, 'inputJson');
+  const preferred = input.input === undefined ? {} : jsonObjectValue(input.input, 'input');
+  return { ...legacy, ...fallback, ...preferred };
+}
+
 function validateSpec(value: unknown, builtins: Map<string, ToolDefinition>): CustomExtensionSpec {
   const spec = objectValue(value, 'spec') as unknown as CustomExtensionSpec;
   if (typeof spec.name !== 'string' || !EXTENSION_NAME.test(spec.name) || RESERVED_NAMES.has(spec.name)) throw new Error('Extension name must match [a-z][a-z0-9_]{2,63} and cannot use a facade name.');
@@ -64,7 +81,9 @@ export class ExtensionService {
       handlerKind: tool.handler.kind,
       ...(includeSchemas ? { inputSchema: tool.inputSchema } : {}),
     }));
-    const tools = [...builtins, ...custom].filter((tool) => !query || `${tool.name} ${tool.title} ${tool.description}`.toLowerCase().includes(query));
+    const catalog = [...builtins, ...custom];
+    const matches = catalog.filter((tool) => !query || `${tool.name} ${tool.title} ${tool.description}`.toLowerCase().includes(query));
+    const tools = query && matches.length === 0 ? catalog : matches;
     return {
       ok: true,
       data: {
@@ -73,7 +92,7 @@ export class ExtensionService {
         instructions: {
           discover: 'Call extension_discover first when you do not know the available capability or its exact input schema.',
           register: 'Call extension_register with action=validate before action=upsert. Custom tools use either a builtin alias or an executable plus argument templates such as {{input.path}}.',
-          call: 'Call extension_call with the exact tool name and an arguments object matching its schema. Include sessionId when coordinating multiple ChatGPT sessions.',
+          call: 'Call extension_call with the exact tool name and an input object matching its schema. The legacy arguments object is also accepted. Include sessionId when coordinating multiple ChatGPT sessions.',
           collaboration: 'Register each worker with session_register, exchange work and review notes with message_send/message_inbox, and keep session status current.',
         },
         registrationSchema: {
@@ -87,6 +106,7 @@ export class ExtensionService {
             { kind: 'command', executable: 'binary name', args: ['literal', '{{input.field}}'], cwd: 'optional workspace-relative directory', timeoutSec: '1-3600' },
           ],
         },
+        query: query ? { value: query, matched: matches.length, usedFullCatalogFallback: matches.length === 0 } : undefined,
       },
     };
   }
@@ -100,7 +120,8 @@ export class ExtensionService {
         return { ok: true, data: { action, name: input.name, removed: true } };
       }
       if (action !== 'validate' && action !== 'upsert') throw new Error('action must be validate, upsert, or remove.');
-      const spec = validateSpec(input.spec, this.builtins);
+      const rawSpec = input.spec ?? input.specJson;
+      const spec = validateSpec(typeof rawSpec === 'string' ? jsonObjectValue(rawSpec, 'specJson') : rawSpec, this.builtins);
       if (action === 'upsert') this.store.upsertExtension(spec);
       return { ok: true, data: { action, valid: true, registered: action === 'upsert', spec } };
     } catch (error) {
@@ -111,7 +132,7 @@ export class ExtensionService {
   async call(input: JsonObject, context: InvocationContext): Promise<ToolResponse> {
     try {
       if (typeof input.tool !== 'string') throw new Error('tool is required.');
-      const args = input.arguments === undefined ? {} : objectValue(input.arguments, 'arguments');
+      const args = callArguments(input);
       const invocationContext: InvocationContext = { ...context, sessionId: typeof input.sessionId === 'string' ? input.sessionId : context.sessionId };
       const builtin = this.builtins.get(input.tool);
       if (builtin) {

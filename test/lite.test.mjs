@@ -106,9 +106,15 @@ test('Actions OpenAPI 3.1 document exposes three operations and concrete compone
     assert.equal(typeof schema.components.schemas, 'object');
     assert.deepEqual(Object.keys(schema.components.schemas).sort(), [
       'Error',
+      'ExtensionAnnotations',
       'ExtensionCallRequest',
       'ExtensionDiscoverRequest',
+      'ExtensionHandler',
       'ExtensionRegisterRequest',
+      'ExtensionSpec',
+      'ExtensionToolInput',
+      'JsonObjectSchema',
+      'JsonSchemaProperty',
       'ToolResponse',
     ]);
     assert.deepEqual(Object.keys(schema.paths).sort(), [
@@ -124,8 +130,74 @@ test('Actions OpenAPI 3.1 document exposes three operations and concrete compone
       assert.ok(schema.components.schemas[requestRef.split('/').at(-1)]);
       assert.ok(schema.components.schemas[responseRef.split('/').at(-1)]);
     }
+    const callProperties = schema.components.schemas.ExtensionCallRequest.properties;
+    assert.equal(callProperties.input.$ref, '#/components/schemas/ExtensionToolInput');
+    assert.equal(callProperties.arguments.$ref, '#/components/schemas/ExtensionToolInput');
+    assert.equal(callProperties.inputJson.type, 'string');
+    assert.equal(schema.components.schemas.ExtensionRegisterRequest.properties.spec.$ref, '#/components/schemas/ExtensionSpec');
+    assert.equal(schema.components.schemas.ExtensionToolInput.properties.body.type, 'string');
+    assert.equal(schema.components.schemas.ExtensionSpec.properties.handler.$ref, '#/components/schemas/ExtensionHandler');
+    const callExamples = schema.paths['/actions/extensions/call'].post.requestBody.content['application/json'].examples;
+    assert.equal(callExamples.sendMessage.value.input.body, 'Please review this change.');
+    const registerExample = schema.paths['/actions/extensions/register'].post.requestBody.content['application/json'].examples.validateBuiltinAlias;
+    assert.equal(registerExample.value.spec.handler.target, 'session_list');
     const aliasResponse = await fetch(`${server.baseUrl}/openapi-3.1.json`);
     assert.deepEqual(await aliasResponse.json(), schema);
+  } finally {
+    await server.close();
+  }
+});
+
+test('Actions complete register, message, receive, and cleanup workflow with explicit input and spec', async () => {
+  const server = await createRuntime();
+  try {
+    const post = async (pathName, body) => {
+      const response = await fetch(`${server.baseUrl}${pathName}`, {
+        method: 'POST', headers: actionsHeaders(), body: JSON.stringify(body),
+      });
+      const text = await response.text();
+      assert.equal(response.status, 200, text);
+      const parsed = JSON.parse(text);
+      assert.equal(parsed.ok, true, text);
+      return parsed;
+    };
+
+    const discovery = await post('/actions/extensions/discover', { query: 'no_such_capability', includeSchemas: false });
+    assert.ok(discovery.data.total >= 21);
+    assert.equal(discovery.data.query.usedFullCatalogFallback, true);
+    assert.ok(discovery.data.tools.some((tool) => tool.name === 'message_send'));
+
+    const spec = {
+      name: 'list_collaborators',
+      title: 'List collaborators',
+      description: 'List all currently registered collaboration sessions through a builtin alias.',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+      handler: { kind: 'builtin', target: 'session_list' },
+    };
+    await post('/actions/extensions/register', { action: 'validate', spec });
+    await post('/actions/extensions/register', { action: 'upsert', spec });
+    const customCall = await post('/actions/extensions/call', { tool: 'list_collaborators', input: {} });
+    assert.deepEqual(customCall.data.result.sessions, []);
+
+    const builder = await post('/actions/extensions/call', { tool: 'session_register', input: { name: 'builder', role: 'developer' } });
+    const reviewer = await post('/actions/extensions/call', { tool: 'session_register', arguments: { name: 'reviewer', role: 'reviewer' } });
+    const builderId = builder.data.result.session.id;
+    const reviewerId = reviewer.data.result.session.id;
+    await post('/actions/extensions/call', {
+      tool: 'message_send', sessionId: builderId, input: { to: reviewerId, body: 'Review the Actions envelope.' },
+    });
+    const inbox = await post('/actions/extensions/call', {
+      tool: 'message_inbox', sessionId: reviewerId, input: { markRead: true },
+    });
+    assert.equal(inbox.data.result.messages.length, 1);
+    assert.equal(inbox.data.result.messages[0].body, 'Review the Actions envelope.');
+
+    await post('/actions/extensions/register', { action: 'remove', name: spec.name });
+    await post('/actions/extensions/call', { tool: 'session_unregister', input: { session: builderId } });
+    await post('/actions/extensions/call', { tool: 'session_unregister', input: { session: reviewerId } });
+    assert.equal(server.runtime.store.snapshot().extensions.length, 0);
+    assert.equal(server.runtime.store.snapshot().sessions.length, 0);
   } finally {
     await server.close();
   }

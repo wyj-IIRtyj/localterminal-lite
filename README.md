@@ -67,6 +67,18 @@ Configure Bearer authentication with the Actions token shown in the TUI's Settin
 
 The default document is OpenAPI 3.1.0, as required by the current ChatGPT Actions importer, and exposes exactly three operations: `extensionDiscover`, `extensionRegister`, and `extensionCall`. Its `components.schemas` section is always a concrete object containing the request and response schemas. `/openapi-3.1.json` remains as an equivalent compatibility alias.
 
+Actions calls put concrete tool arguments inside `input` (preferred); `arguments` remains a compatibility alias and `inputJson` is available for custom fields that an importer cannot represent. For example:
+
+```json
+{
+  "tool": "message_send",
+  "sessionId": "ses_sender",
+  "input": { "to": "ses_recipient", "body": "Please review this change." }
+}
+```
+
+`extensionRegister` accepts a fully described `spec` object. `specJson` is a fallback for clients that can only send the complete spec as a JSON string. The OpenAPI document includes concrete examples for discovery, registration, session creation, message sending, and inbox reading.
+
 ## Extension workflow
 
 1. Call `extension_discover` to inspect available builtins, schemas, and registration instructions.
