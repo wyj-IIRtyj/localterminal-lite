@@ -8,7 +8,7 @@ import { LiteRuntime } from '../dist/server.js';
 import { LiteStore, SESSION_TIMING } from '../dist/store.js';
 import { WorkspaceDiffTracker } from '../dist/diff.js';
 import { conversationGroups, logicalSessionGroups, selectedViewport } from '../dist/tui-model.js';
-import { mouseWheelDelta, terminalMouseInput, wrapTerminalLine, wrapTerminalLines } from '../dist/tui-layout.js';
+import { terminalFrame, wrapTerminalLine, wrapTerminalLines } from '../dist/tui-layout.js';
 import { createDefaultSettings, loadLiteConfig, readLiteSettings, saveLiteSettings, settingsPath } from '../dist/config.js';
 
 const CONNECTOR_KEY = 'test-connector-key-1234567890';
@@ -42,18 +42,13 @@ async function root(server, name = 'main', continuesSessionId) {
 }
 const task = { objective: 'Implement the assigned slice.', background: 'The root session delegated bounded work.', deliverables: ['Code and summary'], acceptanceCriteria: ['Checks pass'], constraints: ['Stay within scope'] };
 
-test('TUI wraps ANSI and CJK content and recognizes SGR mouse-wheel input', () => {
+test('TUI wraps ANSI and CJK content without discarding display cells', () => {
   assert.deepEqual(wrapTerminalLine('中文abcdef', 6), ['中文ab', 'cdef']);
   const colored = wrapTerminalLines(['\u001b[31m一段很长的状态说明abcdef\u001b[0m'], 8);
   assert.ok(colored.length > 1); assert.ok(colored.every((line) => line.includes('\u001b[')));
-  assert.equal(mouseWheelDelta('\u001b[<64;10;4M'), -3);
-  assert.equal(mouseWheelDelta('\u001b[<65;10;4M'), 3);
-  assert.deepEqual(terminalMouseInput('\u001b[<0;12;6M'), { isMouse: true, wheelDelta: 0 });
-  assert.deepEqual(terminalMouseInput('\u001b[<0;12;6m'), { isMouse: true, wheelDelta: 0 });
-  assert.deepEqual(terminalMouseInput('\u001b[<32;13;6M'), { isMouse: true, wheelDelta: 0 });
-  assert.deepEqual(terminalMouseInput('\u001b[<68;13;6M'), { isMouse: true, wheelDelta: -3 });
-  assert.deepEqual(terminalMouseInput('\u001b[M !!'), { isMouse: true, wheelDelta: 0 });
-  assert.equal(mouseWheelDelta('ordinary keyboard input'), 0);
+  const frame = terminalFrame(['long stale content', 'short'], 20);
+  assert.equal((frame.output.match(/\u001b\[K/g) || []).length, 2);
+  assert.ok(frame.output.startsWith('\u001b[H')); assert.ok(frame.output.endsWith('\u001b[J'));
 });
 
 function parseEventStreamJson(text) {
@@ -243,7 +238,7 @@ test('Apps exposes only three tools and binds openai/session only after explicit
   const server = await createRuntime();
   try {
     const url = `${server.baseUrl}/mcp/${CONNECTOR_KEY}`;
-    const init = await rpcPost(url, { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'lite-test', version: '0.4.1' } } });
+    const init = await rpcPost(url, { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'lite-test', version: '0.4.2' } } });
     assert.match(init.data.result.instructions, /Do not use session_inherit to continue completed work/); assert.match(init.data.result.instructions, /message_conversation/);
     const listed = await rpcPost(url, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }, init.sessionId);
     assert.deepEqual(listed.data.result.tools.map((tool) => tool.name).sort(), ['extension_call', 'extension_discover', 'extension_register']);

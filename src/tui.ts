@@ -5,7 +5,7 @@ import { emitKeypressEvents } from 'node:readline';
 import { createInterface } from 'node:readline/promises';
 import { WorkspaceDiffTracker } from './diff.js';
 import { conversationGroups, logicalSessionGroups } from './tui-model.js';
-import { terminalMouseInput, wrapTerminalLine, wrapTerminalLines } from './tui-layout.js';
+import { terminalFrame, wrapTerminalLine, wrapTerminalLines } from './tui-layout.js';
 import type { CustomExtensionSpec, LiteSession, LiteSettings, SessionPhase, TaskPackage } from './types.js';
 import type { LiteRuntime } from './server.js';
 import { maskCredential, readLiteSettings, rotateLiteCredentials, validateSettings } from './config.js';
@@ -17,8 +17,9 @@ const bold = `${ESC}1m`;
 const inverse = `${ESC}7m`;
 const noWrap = `${ESC}?7l`;
 const wrap = `${ESC}?7h`;
-const mouseOn = `${ESC}?1002h${ESC}?1006h`;
-const mouseOff = `${ESC}?1002l${ESC}?1000l${ESC}?1006l`;
+const mouseReportingOff = `${ESC}?1003l${ESC}?1002l${ESC}?1000l${ESC}?1006l`;
+const alternateScrollOn = `${ESC}?1007h`;
+const alternateScrollOff = `${ESC}?1007l`;
 
 type Tab = 'Overview' | 'Sessions' | 'Messages' | 'Diff' | 'Extensions' | 'Settings' | 'Logs';
 const TABS: Tab[] = ['Overview', 'Sessions', 'Messages', 'Diff', 'Extensions', 'Settings', 'Logs'];
@@ -29,10 +30,6 @@ export type RuntimeReconfigure = (settings: LiteSettings) => Promise<RuntimeReco
 
 function integer(value: string, fallback: number): number {
   const parsed = Number.parseInt(value, 10); return Number.isFinite(parsed) ? parsed : fallback;
-}
-
-function fit(value: string, width: number): string {
-  return wrapTerminalLine(value, width)[0] || '';
 }
 
 export async function runSetupTui(defaults: LiteSettings): Promise<LiteSettings> {
@@ -67,10 +64,7 @@ export class LiteTui {
   private stopped = false;
   private revealCredentials = false;
   private showAuditFacts = false;
-  private suppressMouseKeypress = false;
-  private scrollAnimation?: NodeJS.Timeout;
-  private smoothScrollRemaining = 0;
-  private smoothScrollTab = 0;
+  private lastFrame = '';
   private detail?: Detail;
   private readonly selected = Array(TABS.length).fill(0) as number[];
   private readonly scroll = Array(TABS.length).fill(0) as number[];
@@ -92,24 +86,27 @@ export class LiteTui {
   async run(): Promise<void> {
     if (!stdin.isTTY || !stdout.isTTY) throw new Error('Interactive TUI requires a TTY. Use --headless for service mode.');
     emitKeypressEvents(stdin); stdin.setRawMode(true); stdin.resume();
-    stdout.write(`${ESC}?1049h${noWrap}${mouseOn}${ESC}?25l${clear}`); stdin.on('keypress', this.onKeypress); stdin.prependListener('data', this.onRawInput); this.diff.start();
+    stdout.write(`${ESC}?1049h${noWrap}${mouseReportingOff}${alternateScrollOn}${ESC}?25l${clear}`); stdin.on('keypress', this.onKeypress); this.diff.start();
     this.timer = setInterval(() => { this.tickReminders(); if (!this.prompting) this.render(); }, 500); this.render();
     await new Promise<void>((resolve) => { const poll = setInterval(() => { if (this.stopped) { clearInterval(poll); resolve(); } }, 50); });
   }
 
   private readonly onKeypress = async (_text: string, key: { name?: string; ctrl?: boolean }): Promise<void> => {
-    if (this.prompting || this.suppressMouseKeypress) return;
-    this.cancelSmoothScroll(); this.freeScrollTabs.delete(this.tab);
+    if (this.prompting) return;
     try {
       if ((key.ctrl && key.name === 'c') || key.name === 'q') { await this.shutdown(); return; }
-      if (key.name === 'escape' && this.detail) { this.detail = undefined; this.scroll[this.tab] = 0; }
+      if (key.name === 'escape' && this.detail) { this.detail = undefined; this.scroll[this.tab] = 0; this.freeScrollTabs.delete(this.tab); }
       else if (key.name && /^[1-7]$/.test(key.name)) { this.detail = undefined; this.tab = Number(key.name) - 1; }
       else if (!this.detail && (key.name === 'tab' || key.name === 'right')) this.tab = (this.tab + 1) % TABS.length;
       else if (!this.detail && key.name === 'left') this.tab = (this.tab + TABS.length - 1) % TABS.length;
-      else if (key.name === 'up' || (key.name === 'k' && (Boolean(this.detail) || this.tab === 3 || this.tab === 6))) this.move(-1);
-      else if (key.name === 'down' || (key.name === 'j' && (Boolean(this.detail) || this.tab === 3 || this.tab === 6))) this.move(1);
-      else if (key.name === 'pageup') this.move(-Math.max(5, (stdout.rows || 30) - 8));
-      else if (key.name === 'pagedown') this.move(Math.max(5, (stdout.rows || 30) - 8));
+      else if (key.name === 'up') this.scrollRows(-1);
+      else if (key.name === 'down') this.scrollRows(1);
+      else if (key.name === 'k' && !this.detail && [1, 2, 4].includes(this.tab)) this.moveFocus(-1);
+      else if (key.name === 'j' && !this.detail && [1, 2, 4].includes(this.tab)) this.moveFocus(1);
+      else if (key.name === 'k' && (Boolean(this.detail) || this.tab === 3 || this.tab === 6)) this.scrollRows(-1);
+      else if (key.name === 'j' && (Boolean(this.detail) || this.tab === 3 || this.tab === 6)) this.scrollRows(1);
+      else if (key.name === 'pageup') this.scrollRows(-Math.max(5, (stdout.rows || 30) - 8));
+      else if (key.name === 'pagedown') this.scrollRows(Math.max(5, (stdout.rows || 30) - 8));
       else if (key.name === 'return') this.openFocused();
       else if (key.name === 'n' && this.tab === 1) await this.promptNewSession();
       else if (key.name === 'u' && this.tab === 1) await this.promptSessionAction();
@@ -125,35 +122,12 @@ export class LiteTui {
     this.render();
   };
 
-  private readonly onRawInput = (chunk: Buffer | string): void => {
-    if (this.prompting) return;
-    const mouse = terminalMouseInput(chunk.toString());
-    if (!mouse.isMouse) return;
-    this.suppressMouseKeypress = true;
-    queueMicrotask(() => { this.suppressMouseKeypress = false; });
-    if (mouse.wheelDelta) this.queueSmoothScroll(mouse.wheelDelta);
-  };
-
-  private queueSmoothScroll(delta: number): void {
-    if (this.scrollAnimation && this.smoothScrollTab !== this.tab) this.cancelSmoothScroll();
-    this.smoothScrollTab = this.tab;
-    this.smoothScrollRemaining = Math.max(-30, Math.min(30, this.smoothScrollRemaining + delta));
-    if (this.scrollAnimation) return;
-    this.scrollAnimation = setInterval(() => {
-      if (this.stopped || this.prompting || this.tab !== this.smoothScrollTab || this.smoothScrollRemaining === 0) { this.cancelSmoothScroll(); return; }
-      const direction = Math.sign(this.smoothScrollRemaining); this.smoothScrollRemaining -= direction;
-      this.freeScrollTabs.add(this.tab); this.scroll[this.tab] = Math.max(0, this.scroll[this.tab] + direction); this.render();
-      if (this.smoothScrollRemaining === 0) { this.cancelSmoothScroll(); this.render(); }
-    }, 18);
+  private scrollRows(delta: number): void {
+    this.freeScrollTabs.add(this.tab); this.scroll[this.tab] = Math.max(0, this.scroll[this.tab] + delta);
   }
 
-  private cancelSmoothScroll(): void {
-    if (this.scrollAnimation) clearInterval(this.scrollAnimation);
-    this.scrollAnimation = undefined; this.smoothScrollRemaining = 0;
-  }
-
-  private move(delta: number): void {
-    if (this.detail || [0, 3, 5, 6].includes(this.tab)) { this.scroll[this.tab] = Math.max(0, this.scroll[this.tab] + delta); return; }
+  private moveFocus(delta: number): void {
+    this.freeScrollTabs.delete(this.tab);
     const count = this.tab === 1 ? logicalSessionGroups(this.runtime.store.listSessions()).length
       : this.tab === 2 ? conversationGroups(this.runtime.store.snapshot().messages).length
         : this.tab === 4 ? this.runtime.store.snapshot().extensions.length : 0;
@@ -172,13 +146,14 @@ export class LiteTui {
     const tabNames = this.zh ? ['概览', '会话', '消息', '差异', '扩展', '设置', '日志'] : TABS;
     const tabs = tabNames.map((name, index) => index === this.tab ? `${c.selected}${bold} ${index + 1} ${name} ${reset}` : `${c.muted} ${index + 1} ${name} ${reset}`).join(' ');
     const header = [
-      ...wrapTerminalLine(`${bold}${c.accent}LocalTerminal Lite${reset}  ${c.good}● ${this.text('running', '运行中')}${reset}  ${c.muted}v0.4.1${reset}`, width),
+      ...wrapTerminalLine(`${bold}${c.accent}LocalTerminal Lite${reset}  ${c.good}● ${this.text('running', '运行中')}${reset}  ${c.muted}v0.4.2${reset}`, width),
       ...(attention.length ? wrapTerminalLine(`${c.bad}${bold} ! ${attention.length} ${this.text('session(s) need a controller', '个 session 等待接管')} ${reset}`, width) : []),
       ...wrapTerminalLine(tabs, width), '─'.repeat(width),
     ];
     const footerHints = wrapTerminalLine(` ${this.keyHints()} `, width);
     const footer = ['─'.repeat(width), ...footerHints.map((line) => `${inverse}${bold}${line}${reset}`)];
     const contentHeight = Math.max(1, height - header.length - footer.length);
+    const selectionBefore = this.selected[this.tab];
     let content: string[];
     if (this.detail?.kind === 'session') content = this.renderSessionDetail(this.detail.id, contentHeight, width);
     else if (this.detail?.kind === 'conversation') content = this.renderConversationDetail(this.detail.id, contentHeight, width);
@@ -189,18 +164,23 @@ export class LiteTui {
     else if (this.tab === 4) content = this.renderExtensions(state, contentHeight, width);
     else if (this.tab === 5) content = this.scrolled(this.renderSettings(), contentHeight, width);
     else content = this.renderLogs(contentHeight, width);
+    if (!this.detail && selectionBefore !== this.selected[this.tab]) {
+      if (this.tab === 1) content = this.renderSessions(state, contentHeight, width);
+      else if (this.tab === 2) content = this.renderMessages(state, contentHeight, width);
+      else if (this.tab === 4) content = this.renderExtensions(state, contentHeight, width);
+    }
     const rows = [...header, ...content.slice(0, contentHeight), ...Array(Math.max(0, contentHeight - content.length)).fill(''), ...footer].slice(0, height);
-    stdout.write(`${ESC}H${rows.map((row) => fit(row, width)).join('\n')}`);
+    const frame = terminalFrame(rows, width); if (frame.signature === this.lastFrame) return; this.lastFrame = frame.signature; stdout.write(frame.output);
   }
 
   private keyHints(): string {
-    if (this.detail) return this.text('↑↓/wheel smooth scroll  PgUp/PgDn page  Esc back  q quit', '↑↓/滚轮 平滑滚动  PgUp/PgDn 翻页  Esc 返回  q 退出');
+    if (this.detail) return this.text('↑↓/wheel scroll  PgUp/PgDn page  Esc back  q quit', '↑↓/滚轮 滚动  PgUp/PgDn 翻页  Esc 返回  q 退出');
     const common = this.text('1-7/Tab page', '1-7/Tab 页面');
     if (this.tab === 0) return `${common}  ↑↓/${this.text('wheel scroll', '滚轮 滚动')}  c ${this.text('configure', '配置')}  v ${this.text('credentials', '凭据')}  q ${this.text('quit', '退出')}`;
-    if (this.tab === 1) return `↑↓ ${this.text('focus', '选择')}  ${this.text('wheel smooth scroll', '滚轮 平滑滚动')}  Enter ${this.text('open', '打开')}  n ${this.text('new/delegate', '新建/委派')}  u ${this.text('actions', '操作')}  q ${this.text('quit', '退出')}`;
-    if (this.tab === 2) return `↑↓ ${this.text('focus', '选择')}  ${this.text('wheel smooth scroll', '滚轮 平滑滚动')}  Enter ${this.text('conversation', '完整对话')}  m ${this.text('send', '发送')}  q ${this.text('quit', '退出')}`;
+    if (this.tab === 1) return `↑↓/${this.text('wheel scroll', '滚轮 滚动')}  j/k ${this.text('focus', '选择')}  Enter ${this.text('open', '打开')}  n ${this.text('new/delegate', '新建/委派')}  u ${this.text('actions', '操作')}  q ${this.text('quit', '退出')}`;
+    if (this.tab === 2) return `↑↓/${this.text('wheel scroll', '滚轮 滚动')}  j/k ${this.text('focus', '选择')}  Enter ${this.text('conversation', '完整对话')}  m ${this.text('send', '发送')}  q ${this.text('quit', '退出')}`;
     if (this.tab === 3) return `↑↓/${this.text('wheel scroll', '滚轮 滚动')}  PgUp/PgDn ${this.text('page', '翻页')}  r ${this.text('refresh', '刷新')}  q ${this.text('quit', '退出')}`;
-    if (this.tab === 4) return `↑↓ ${this.text('focus', '选择')}  ${this.text('wheel smooth scroll', '滚轮 平滑滚动')}  e ${this.text('add', '新增')}  x ${this.text('remove', '删除')}  q ${this.text('quit', '退出')}`;
+    if (this.tab === 4) return `↑↓/${this.text('wheel scroll', '滚轮 滚动')}  j/k ${this.text('focus', '选择')}  e ${this.text('add', '新增')}  x ${this.text('remove', '删除')}  q ${this.text('quit', '退出')}`;
     if (this.tab === 5) return `↑↓/${this.text('wheel scroll', '滚轮 滚动')}  c ${this.text('configure', '修改配置')}  v ${this.text('reveal', '显示凭据')}  k ${this.text('rotate', '轮换凭据')}  q ${this.text('quit', '退出')}`;
     return `↑↓/${this.text('wheel scroll', '滚轮 滚动')}  a ${this.text('audit facts on/off', '事实调用 开/关')}  q ${this.text('quit', '退出')}`;
   }
@@ -353,11 +333,11 @@ export class LiteTui {
   }
 
   private async ask(questions: Array<{ label: string; fallback?: string }>, preamble: string[] = []): Promise<string[]> {
-    this.cancelSmoothScroll(); this.prompting = true; stdin.off('keypress', this.onKeypress); stdin.off('data', this.onRawInput); stdin.setRawMode(false); stdout.write(`${mouseOff}${wrap}${ESC}?25h${clear}${bold}LocalTerminal Lite · ${this.text('Input', '输入')}${reset}\n${'─'.repeat(Math.max(40, stdout.columns || 80))}\n`);
+    this.prompting = true; stdin.off('keypress', this.onKeypress); stdin.setRawMode(false); stdout.write(`${alternateScrollOff}${mouseReportingOff}${wrap}${ESC}?25h${clear}${bold}LocalTerminal Lite · ${this.text('Input', '输入')}${reset}\n${'─'.repeat(Math.max(40, stdout.columns || 80))}\n`);
     if (preamble.length) stdout.write(`${wrapTerminalLines(preamble, Math.max(40, stdout.columns || 80)).join('\n')}\n${'─'.repeat(Math.max(40, stdout.columns || 80))}\n`);
     const rl = createInterface({ input: stdin, output: stdout }); const answers: string[] = [];
     try { for (const question of questions) { const answer = await rl.question(`${question.label}${question.fallback ? ` [${question.fallback}]` : ''}: `); answers.push(answer.trim() || question.fallback || ''); } }
-    finally { rl.close(); emitKeypressEvents(stdin); stdin.setRawMode(true); stdin.resume(); stdin.on('keypress', this.onKeypress); stdin.prependListener('data', this.onRawInput); stdout.write(`${noWrap}${mouseOn}${ESC}?25l${clear}`); this.prompting = false; }
+    finally { rl.close(); emitKeypressEvents(stdin); stdin.setRawMode(true); stdin.resume(); stdin.on('keypress', this.onKeypress); this.lastFrame = ''; stdout.write(`${noWrap}${mouseReportingOff}${alternateScrollOn}${ESC}?25l${clear}`); this.prompting = false; }
     return answers;
   }
 
@@ -495,6 +475,6 @@ export class LiteTui {
   }
 
   private async shutdown(): Promise<void> {
-    if (this.stopped) return; this.stopped = true; this.cancelSmoothScroll(); if (this.timer) clearInterval(this.timer); this.diff.stop(); stdin.off('keypress', this.onKeypress); stdin.off('data', this.onRawInput); stdin.setRawMode(false); stdin.pause(); stdout.write(`${mouseOff}${wrap}${ESC}?25h${ESC}?1049l`); await this.runtime.close();
+    if (this.stopped) return; this.stopped = true; if (this.timer) clearInterval(this.timer); this.diff.stop(); stdin.off('keypress', this.onKeypress); stdin.setRawMode(false); stdin.pause(); stdout.write(`${alternateScrollOff}${mouseReportingOff}${wrap}${ESC}?25h${ESC}?1049l`); await this.runtime.close();
   }
 }

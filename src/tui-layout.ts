@@ -12,18 +12,7 @@ export function wrapTerminalLines(lines: string[], width: number): string[] {
   return lines.flatMap((line) => wrapTerminalLine(line, width));
 }
 
-export type TerminalMouseInput = { isMouse: boolean; wheelDelta: number };
-
-export function terminalMouseInput(input: string): TerminalMouseInput {
-  let isMouse = false; let wheelDelta = 0;
-  for (const match of input.matchAll(/\u001b\[<(\d+);\d+;\d+[Mm]/g)) {
-    isMouse = true; const button = Number.parseInt(match[1], 10);
-    if ((button & 64) !== 0) wheelDelta += (button & 1) === 0 ? -3 : 3;
-  }
-  if (/\u001b\[M[\s\S]{3}/.test(input)) isMouse = true;
-  return { isMouse, wheelDelta };
-}
-
-export function mouseWheelDelta(input: string): number {
-  return terminalMouseInput(input).wheelDelta;
+export function terminalFrame(lines: string[], width: number): { signature: string; output: string } {
+  const rows = lines.map((line) => wrapTerminalLine(line, width)[0] || '');
+  return { signature: rows.join('\n'), output: `\u001b[H${rows.map((row) => `${row}\u001b[K`).join('\n')}\u001b[J` };
 }
