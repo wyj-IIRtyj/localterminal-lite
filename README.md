@@ -1,6 +1,6 @@
 # LocalTerminal Lite
 
-LocalTerminal Lite 0.3 is a single-workspace development bridge with auditable, inheritable work sessions. It provides ChatGPT Apps (MCP), ChatGPT Actions (OpenAPI 3.1), a declarative extension registry, durable multi-session messages, and a full-window bilingual TUI.
+LocalTerminal Lite 0.4 is a single-workspace development bridge with auditable, inheritable work sessions. It provides ChatGPT Apps (MCP), ChatGPT Actions (OpenAPI 3.1), a declarative extension registry, durable multi-session messages, and a full-window bilingual TUI.
 
 The model-visible surface always contains exactly three facade tools:
 
@@ -32,10 +32,10 @@ npm run start -- --headless
 The TUI is the owner control plane:
 
 - `1`–`7` or Tab switches Overview, Sessions, Messages, Diff, Extensions, Settings, and Logs.
-- Sessions shows one row per logical session. Immutable continuation records and delegated children are collapsed inside that row; Enter opens the complete permanent history.
+- Sessions shows one structured tree card per logical session. Continuation records stay inside the card, delegated children are indented like directories under their parent, and colored phase/presence badges remain visible. Enter opens the complete permanent history.
 - Messages groups records by participant pair. Enter opens the complete two-way conversation.
 - Diff continuously tracks staged, unstaged, and untracked workspace changes with Git-style file, hunk, and `+`/`-` lines.
-- Up/Down or `j`/`k` scrolls long Diff, Logs, history, and conversation views; PageUp/PageDown moves by a screen.
+- Up/Down, the mouse wheel, or `j`/`k` scrolls long content; PageUp/PageDown moves by a screen. The wheel also moves focus through Sessions, Messages, and Extensions.
 - `n` prepares a root session or creates a structured direct child under a selected root.
 - `u` opens actions for the focused session. Passive prompt copying never revokes a controller; revoke is always explicit.
 - `m` sends an owner-mediated session message.
@@ -44,7 +44,7 @@ The TUI is the owner control plane:
 - `a` on Logs toggles sanitized factual tool calls from every session.
 - `q` stops Lite.
 
-The main screen uses the terminal alternate buffer, disables line wrapping, and always renders exactly one terminal window. Normal terminal scrollback is not used. Key hints are contextual and highlighted at the bottom instead of listing every application command at once.
+The main screen uses the terminal alternate buffer, disables normal scrollback, enables terminal mouse reporting, and always renders exactly one terminal window. ANSI-aware display-width wrapping preserves colors and wraps Chinese, paths, logs, diffs, summaries, and prompts to the current terminal width instead of discarding their tails. Key hints are contextual, responsive, and highlighted at the bottom instead of listing every application command at once.
 
 Pending delegated sessions appear in a persistent red banner. Lite copies a handoff prompt to the clipboard, rings the terminal every 60 seconds, and sends an OS notification every five minutes until the session is claimed or cancelled. macOS uses native `pbcopy` and notifications; Windows/Linux use best-effort native commands and fall back to visible TUI text.
 

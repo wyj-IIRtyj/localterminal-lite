@@ -8,6 +8,7 @@ import { LiteRuntime } from '../dist/server.js';
 import { LiteStore, SESSION_TIMING } from '../dist/store.js';
 import { WorkspaceDiffTracker } from '../dist/diff.js';
 import { conversationGroups, logicalSessionGroups, selectedViewport } from '../dist/tui-model.js';
+import { mouseWheelDelta, wrapTerminalLine, wrapTerminalLines } from '../dist/tui-layout.js';
 import { createDefaultSettings, loadLiteConfig, readLiteSettings, saveLiteSettings, settingsPath } from '../dist/config.js';
 
 const CONNECTOR_KEY = 'test-connector-key-1234567890';
@@ -40,6 +41,15 @@ async function root(server, name = 'main', continuesSessionId) {
   return response.body.data.result;
 }
 const task = { objective: 'Implement the assigned slice.', background: 'The root session delegated bounded work.', deliverables: ['Code and summary'], acceptanceCriteria: ['Checks pass'], constraints: ['Stay within scope'] };
+
+test('TUI wraps ANSI and CJK content and recognizes SGR mouse-wheel input', () => {
+  assert.deepEqual(wrapTerminalLine('中文abcdef', 6), ['中文ab', 'cdef']);
+  const colored = wrapTerminalLines(['\u001b[31m一段很长的状态说明abcdef\u001b[0m'], 8);
+  assert.ok(colored.length > 1); assert.ok(colored.every((line) => line.includes('\u001b[')));
+  assert.equal(mouseWheelDelta('\u001b[<64;10;4M'), -3);
+  assert.equal(mouseWheelDelta('\u001b[<65;10;4M'), 3);
+  assert.equal(mouseWheelDelta('ordinary keyboard input'), 0);
+});
 
 function parseEventStreamJson(text) {
   const dataLine = text.split('\n').find((line) => line.startsWith('data: ')); assert.ok(dataLine, text); return JSON.parse(dataLine.slice(6));
@@ -228,7 +238,7 @@ test('Apps exposes only three tools and binds openai/session only after explicit
   const server = await createRuntime();
   try {
     const url = `${server.baseUrl}/mcp/${CONNECTOR_KEY}`;
-    const init = await rpcPost(url, { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'lite-test', version: '0.3.0' } } });
+    const init = await rpcPost(url, { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'lite-test', version: '0.4.0' } } });
     assert.match(init.data.result.instructions, /Do not use session_inherit to continue completed work/); assert.match(init.data.result.instructions, /message_conversation/);
     const listed = await rpcPost(url, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }, init.sessionId);
     assert.deepEqual(listed.data.result.tools.map((tool) => tool.name).sort(), ['extension_call', 'extension_discover', 'extension_register']);

@@ -1,6 +1,6 @@
 {
   "name": "localterminal-mcp-lite",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "description": "Lite local WebDev MCP with dual-session collaboration, Apps and Actions adapters, extension tools, and a terminal UI.",
   "type": "module",
@@ -26,6 +26,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "express": "^5.2.1",
+    "wrap-ansi": "^10.0.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {

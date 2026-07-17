@@ -4,8 +4,9 @@ import { stdin, stdout } from 'node:process';
 import { emitKeypressEvents } from 'node:readline';
 import { createInterface } from 'node:readline/promises';
 import { WorkspaceDiffTracker } from './diff.js';
-import { conversationGroups, logicalSessionGroups, selectedViewport } from './tui-model.js';
-import type { CustomExtensionSpec, LiteSession, LiteSettings, TaskPackage } from './types.js';
+import { conversationGroups, logicalSessionGroups } from './tui-model.js';
+import { mouseWheelDelta, wrapTerminalLine, wrapTerminalLines } from './tui-layout.js';
+import type { CustomExtensionSpec, LiteSession, LiteSettings, SessionPhase, TaskPackage } from './types.js';
 import type { LiteRuntime } from './server.js';
 import { maskCredential, readLiteSettings, rotateLiteCredentials, validateSettings } from './config.js';
 
@@ -16,6 +17,8 @@ const bold = `${ESC}1m`;
 const inverse = `${ESC}7m`;
 const noWrap = `${ESC}?7l`;
 const wrap = `${ESC}?7h`;
+const mouseOn = `${ESC}?1000h${ESC}?1006h`;
+const mouseOff = `${ESC}?1000l${ESC}?1006l`;
 
 type Tab = 'Overview' | 'Sessions' | 'Messages' | 'Diff' | 'Extensions' | 'Settings' | 'Logs';
 const TABS: Tab[] = ['Overview', 'Sessions', 'Messages', 'Diff', 'Extensions', 'Settings', 'Logs'];
@@ -28,18 +31,8 @@ function integer(value: string, fallback: number): number {
   const parsed = Number.parseInt(value, 10); return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-function stripAnsi(value: string): string { return value.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, ''); }
 function fit(value: string, width: number): string {
-  if (stripAnsi(value).length <= width) return value;
-  return `${stripAnsi(value).slice(0, Math.max(0, width - 1))}…`;
-}
-function wrapText(value: string, width: number): string[] {
-  const clean = value.replace(/\r/g, ''); const result: string[] = [];
-  for (const source of clean.split('\n')) {
-    if (!source) { result.push(''); continue; }
-    for (let index = 0; index < source.length; index += Math.max(1, width)) result.push(source.slice(index, index + Math.max(1, width)));
-  }
-  return result;
+  return wrapTerminalLine(value, width)[0] || '';
 }
 
 export async function runSetupTui(defaults: LiteSettings): Promise<LiteSettings> {
@@ -74,6 +67,7 @@ export class LiteTui {
   private stopped = false;
   private revealCredentials = false;
   private showAuditFacts = false;
+  private suppressMouseKeypress = false;
   private detail?: Detail;
   private readonly selected = Array(TABS.length).fill(0) as number[];
   private readonly scroll = Array(TABS.length).fill(0) as number[];
@@ -94,13 +88,13 @@ export class LiteTui {
   async run(): Promise<void> {
     if (!stdin.isTTY || !stdout.isTTY) throw new Error('Interactive TUI requires a TTY. Use --headless for service mode.');
     emitKeypressEvents(stdin); stdin.setRawMode(true); stdin.resume();
-    stdout.write(`${ESC}?1049h${noWrap}${ESC}?25l${clear}`); stdin.on('keypress', this.onKeypress); this.diff.start();
+    stdout.write(`${ESC}?1049h${noWrap}${mouseOn}${ESC}?25l${clear}`); stdin.on('keypress', this.onKeypress); stdin.prependListener('data', this.onRawInput); this.diff.start();
     this.timer = setInterval(() => { this.tickReminders(); if (!this.prompting) this.render(); }, 500); this.render();
     await new Promise<void>((resolve) => { const poll = setInterval(() => { if (this.stopped) { clearInterval(poll); resolve(); } }, 50); });
   }
 
   private readonly onKeypress = async (_text: string, key: { name?: string; ctrl?: boolean }): Promise<void> => {
-    if (this.prompting) return;
+    if (this.prompting || this.suppressMouseKeypress) return;
     try {
       if ((key.ctrl && key.name === 'c') || key.name === 'q') { await this.shutdown(); return; }
       if (key.name === 'escape' && this.detail) { this.detail = undefined; this.scroll[this.tab] = 0; }
@@ -126,8 +120,18 @@ export class LiteTui {
     this.render();
   };
 
+  private readonly onRawInput = (chunk: Buffer | string): void => {
+    if (this.prompting) return;
+    const delta = mouseWheelDelta(chunk.toString());
+    if (!delta) return;
+    this.suppressMouseKeypress = true;
+    queueMicrotask(() => { this.suppressMouseKeypress = false; });
+    this.move(this.detail || [0, 3, 5, 6].includes(this.tab) ? delta : Math.sign(delta));
+    this.render();
+  };
+
   private move(delta: number): void {
-    if (this.detail || this.tab === 3 || this.tab === 6) { this.scroll[this.tab] = Math.max(0, this.scroll[this.tab] + delta); return; }
+    if (this.detail || [0, 3, 5, 6].includes(this.tab)) { this.scroll[this.tab] = Math.max(0, this.scroll[this.tab] + delta); return; }
     const count = this.tab === 1 ? logicalSessionGroups(this.runtime.store.listSessions()).length
       : this.tab === 2 ? conversationGroups(this.runtime.store.snapshot().messages).length
         : this.tab === 4 ? this.runtime.store.snapshot().extensions.length : 0;
@@ -145,33 +149,38 @@ export class LiteTui {
     const state = this.runtime.store.snapshot(); const attention = state.sessions.filter((session) => !['completed', 'cancelled'].includes(session.phase) && session.presence !== 'claimed');
     const tabNames = this.zh ? ['概览', '会话', '消息', '差异', '扩展', '设置', '日志'] : TABS;
     const tabs = tabNames.map((name, index) => index === this.tab ? `${c.selected}${bold} ${index + 1} ${name} ${reset}` : `${c.muted} ${index + 1} ${name} ${reset}`).join(' ');
-    const header = [`${bold}${c.accent}LocalTerminal Lite${reset}  ${c.good}● ${this.text('running', '运行中')}${reset}  ${c.muted}v0.3.0${reset}`, ...(attention.length ? [`${c.bad}${bold} ! ${attention.length} ${this.text('session(s) need a controller', '个 session 等待接管')} ${reset}`] : []), tabs, '─'.repeat(width)];
-    const footer = ['─'.repeat(width), `${inverse}${bold} ${this.keyHints()} ${reset}`];
+    const header = [
+      ...wrapTerminalLine(`${bold}${c.accent}LocalTerminal Lite${reset}  ${c.good}● ${this.text('running', '运行中')}${reset}  ${c.muted}v0.4.0${reset}`, width),
+      ...(attention.length ? wrapTerminalLine(`${c.bad}${bold} ! ${attention.length} ${this.text('session(s) need a controller', '个 session 等待接管')} ${reset}`, width) : []),
+      ...wrapTerminalLine(tabs, width), '─'.repeat(width),
+    ];
+    const footerHints = wrapTerminalLine(` ${this.keyHints()} `, width);
+    const footer = ['─'.repeat(width), ...footerHints.map((line) => `${inverse}${bold}${line}${reset}`)];
     const contentHeight = Math.max(1, height - header.length - footer.length);
     let content: string[];
     if (this.detail?.kind === 'session') content = this.renderSessionDetail(this.detail.id, contentHeight, width);
     else if (this.detail?.kind === 'conversation') content = this.renderConversationDetail(this.detail.id, contentHeight, width);
-    else if (this.tab === 0) content = this.renderOverview(state);
-    else if (this.tab === 1) content = this.renderSessions(state, contentHeight);
-    else if (this.tab === 2) content = this.renderMessages(state, contentHeight);
-    else if (this.tab === 3) content = this.renderDiff(contentHeight);
-    else if (this.tab === 4) content = this.renderExtensions(state, contentHeight);
-    else if (this.tab === 5) content = this.renderSettings();
-    else content = this.renderLogs(contentHeight);
+    else if (this.tab === 0) content = this.scrolled(this.renderOverview(state), contentHeight, width);
+    else if (this.tab === 1) content = this.renderSessions(state, contentHeight, width);
+    else if (this.tab === 2) content = this.renderMessages(state, contentHeight, width);
+    else if (this.tab === 3) content = this.renderDiff(contentHeight, width);
+    else if (this.tab === 4) content = this.renderExtensions(state, contentHeight, width);
+    else if (this.tab === 5) content = this.scrolled(this.renderSettings(), contentHeight, width);
+    else content = this.renderLogs(contentHeight, width);
     const rows = [...header, ...content.slice(0, contentHeight), ...Array(Math.max(0, contentHeight - content.length)).fill(''), ...footer].slice(0, height);
     stdout.write(`${clear}${rows.map((row) => fit(row, width)).join('\n')}`);
   }
 
   private keyHints(): string {
-    if (this.detail) return this.text('↑↓/j k scroll  PgUp/PgDn page  Esc back  q quit', '↑↓/j k 滚动  PgUp/PgDn 翻页  Esc 返回  q 退出');
+    if (this.detail) return this.text('↑↓/wheel scroll  PgUp/PgDn page  Esc back  q quit', '↑↓/滚轮 滚动  PgUp/PgDn 翻页  Esc 返回  q 退出');
     const common = this.text('1-7/Tab page', '1-7/Tab 页面');
-    if (this.tab === 0) return `${common}  c ${this.text('configure', '配置')}  v ${this.text('credentials', '凭据')}  q ${this.text('quit', '退出')}`;
-    if (this.tab === 1) return `↑↓ ${this.text('focus', '选择')}  Enter ${this.text('open', '打开')}  n ${this.text('new/delegate', '新建/委派')}  u ${this.text('actions', '操作')}  q ${this.text('quit', '退出')}`;
-    if (this.tab === 2) return `↑↓ ${this.text('focus', '选择')}  Enter ${this.text('conversation', '完整对话')}  m ${this.text('send', '发送')}  q ${this.text('quit', '退出')}`;
-    if (this.tab === 3) return `↑↓/j k ${this.text('scroll', '滚动')}  PgUp/PgDn ${this.text('page', '翻页')}  r ${this.text('refresh', '刷新')}  q ${this.text('quit', '退出')}`;
-    if (this.tab === 4) return `↑↓ ${this.text('focus', '选择')}  e ${this.text('add', '新增')}  x ${this.text('remove', '删除')}  q ${this.text('quit', '退出')}`;
-    if (this.tab === 5) return `c ${this.text('configure', '修改配置')}  v ${this.text('reveal', '显示凭据')}  k ${this.text('rotate', '轮换凭据')}  q ${this.text('quit', '退出')}`;
-    return `↑↓/j k ${this.text('scroll', '滚动')}  a ${this.text('audit facts on/off', '事实调用 开/关')}  q ${this.text('quit', '退出')}`;
+    if (this.tab === 0) return `${common}  ↑↓/${this.text('wheel scroll', '滚轮 滚动')}  c ${this.text('configure', '配置')}  v ${this.text('credentials', '凭据')}  q ${this.text('quit', '退出')}`;
+    if (this.tab === 1) return `↑↓/${this.text('wheel focus', '滚轮 选择')}  Enter ${this.text('open', '打开')}  n ${this.text('new/delegate', '新建/委派')}  u ${this.text('actions', '操作')}  q ${this.text('quit', '退出')}`;
+    if (this.tab === 2) return `↑↓/${this.text('wheel focus', '滚轮 选择')}  Enter ${this.text('conversation', '完整对话')}  m ${this.text('send', '发送')}  q ${this.text('quit', '退出')}`;
+    if (this.tab === 3) return `↑↓/${this.text('wheel scroll', '滚轮 滚动')}  PgUp/PgDn ${this.text('page', '翻页')}  r ${this.text('refresh', '刷新')}  q ${this.text('quit', '退出')}`;
+    if (this.tab === 4) return `↑↓/${this.text('wheel focus', '滚轮 选择')}  e ${this.text('add', '新增')}  x ${this.text('remove', '删除')}  q ${this.text('quit', '退出')}`;
+    if (this.tab === 5) return `↑↓/${this.text('wheel scroll', '滚轮 滚动')}  c ${this.text('configure', '修改配置')}  v ${this.text('reveal', '显示凭据')}  k ${this.text('rotate', '轮换凭据')}  q ${this.text('quit', '退出')}`;
+    return `↑↓/${this.text('wheel scroll', '滚轮 滚动')}  a ${this.text('audit facts on/off', '事实调用 开/关')}  q ${this.text('quit', '退出')}`;
   }
 
   private renderOverview(state: ReturnType<LiteRuntime['store']['snapshot']>): string[] {
@@ -187,14 +196,41 @@ export class LiteTui {
     ];
   }
 
-  private renderSessions(state: ReturnType<LiteRuntime['store']['snapshot']>, height: number): string[] {
+  private phaseColor(phase: SessionPhase): string {
+    if (phase === 'completed') return this.colors.good;
+    if (phase === 'working') return this.colors.accent;
+    if (phase === 'blocked' || phase === 'cancelled') return this.colors.bad;
+    return this.colors.warn;
+  }
+
+  private status(session: LiteSession): string {
+    const presenceColor = session.presence === 'claimed' ? this.colors.good : session.presence === 'stale' ? this.colors.bad : this.colors.warn;
+    return `${this.phaseColor(session.phase)}● ${session.phase}${reset}  ${presenceColor}○ ${session.presence}${reset}`;
+  }
+
+  private renderSessions(state: ReturnType<LiteRuntime['store']['snapshot']>, height: number, width: number): string[] {
     const groups = logicalSessionGroups(state.sessions); if (!groups.length) return [this.text('No sessions. Press n to create one.', '暂无 session，按 n 新建。')];
-    const view = selectedViewport(groups, this.selected[this.tab], height); this.selected[this.tab] = view.selected;
-    return view.visible.map((group, index) => {
-      const selected = view.start + index === view.selected; const current = group.current; const chain = group.sessions.length;
-      const prefix = selected ? `${this.colors.selected}>` : ' '; const summary = current.latestCheckpoint?.summary?.replace(/\s+/g, ' ') || this.text('No checkpoint', '暂无 checkpoint');
-      return `${prefix} ${group.title}  ${this.colors.accent}${current.phase}/${current.presence}${reset}  ${this.text('runs', '继承记录')}:${chain}  ${this.text('children', '子项')}:${group.children.length}  ${this.colors.muted}${summary}${reset}`;
+    this.selected[this.tab] = Math.max(0, Math.min(groups.length - 1, this.selected[this.tab]));
+    const cards = groups.map((group, index) => {
+      const current = group.current; const selected = index === this.selected[this.tab]; const summary = current.latestCheckpoint?.summary || current.finalSummary || this.text('No checkpoint summary yet.', '暂无 checkpoint 总结。');
+      const lines = [`${selected ? `${this.colors.selected}> ◆ ${group.title} ${reset}` : `  ${this.colors.accent}◆${reset} ${bold}${group.title}${reset}`}`,
+        `    ├─ ${this.text('status', '状态')}  ${this.status(current)}`,
+        `    ├─ ${this.text('work records', '工作记录')}  ${group.sessions.length}`];
+      for (const [recordIndex, session] of group.sessions.entries()) {
+        const last = recordIndex === group.sessions.length - 1;
+        lines.push(`    │  ${last ? '└─' : '├─'} ${session.name}  ${this.status(session)}`);
+      }
+      lines.push(`    ├─ ${this.text('child sessions', '子会话')}  ${group.children.length}`);
+      for (const [childIndex, child] of group.children.entries()) {
+        const last = childIndex === group.children.length - 1;
+        lines.push(`    │  ${last ? '└─' : '├─'} 📁 ${child.name}  ${this.status(child)}`);
+        const childSummary = child.latestCheckpoint?.summary || child.task?.objective;
+        if (childSummary) lines.push(`    │     ${last ? ' ' : '│'}  ${this.colors.muted}${childSummary}${reset}`);
+      }
+      lines.push(`    └─ ${this.text('summary', '总结')}`, `       ${this.colors.muted}${summary}${reset}`, '');
+      return wrapTerminalLines(lines, width);
     });
+    return this.cardViewport(cards, this.selected[this.tab], height);
   }
 
   private renderSessionDetail(groupId: string, height: number, width: number): string[] {
@@ -202,23 +238,24 @@ export class LiteTui {
     if (!group) return [this.text('Session no longer exists. Press Esc.', 'Session 已不存在，按 Esc 返回。')];
     const ids = [...group.sessions, ...group.children].map((session) => session.id); const history = this.runtime.store.historiesForTui(ids);
     const lines = [`${bold}${group.title}${reset}  ${this.colors.muted}${group.id}${reset}`, `${this.text('Continuation records', '继承/续作记录')}: ${group.sessions.length}  ${this.text('Child sessions', '子 Sessions')}: ${group.children.length}`, ''];
-    for (const session of group.sessions) lines.push(`${this.colors.accent}◆ ${session.name}${reset}  ${session.phase}/${session.presence}  ${session.id}`, `  ${this.text('Created', '创建')}: ${session.createdAt}  ${this.text('Updated', '更新')}: ${session.updatedAt}`, ...(session.task ? wrapText(`  Objective: ${session.task.objective}`, width - 2) : []), ...(session.latestCheckpoint ? wrapText(`  Checkpoint: ${session.latestCheckpoint.summary}`, width - 2) : []), '');
-    if (group.children.length) { lines.push(`${bold}${this.text('Collaborating children', '协作子会话')}${reset}`); for (const child of group.children) lines.push(`  └─ ${child.name}  ${child.phase}/${child.presence}  ${child.id}`); lines.push(''); }
+    for (const session of group.sessions) lines.push(`${this.colors.accent}◆ ${session.name}${reset}  ${this.status(session)}  ${session.id}`, `  ${this.text('Created', '创建')}: ${session.createdAt}  ${this.text('Updated', '更新')}: ${session.updatedAt}`, ...(session.task ? [`  Objective: ${session.task.objective}`] : []), ...(session.latestCheckpoint ? [`  Checkpoint: ${session.latestCheckpoint.summary}`] : []), '');
+    if (group.children.length) { lines.push(`${bold}${this.text('Collaborating children', '协作子会话')}${reset}`); for (const child of group.children) lines.push(`  └─ 📁 ${child.name}  ${this.status(child)}  ${child.id}`); lines.push(''); }
     lines.push(`${bold}${this.text('Permanent structured history', '永久结构化历史')}${reset}`);
     for (const item of history) {
       lines.push(`${this.colors.muted}${item.entry.at}${reset} ${this.colors.accent}${item.sessionName}${reset} ${bold}${item.entry.type}${reset}`);
-      const rendered = JSON.stringify(item.entry.data, null, 2); for (const row of wrapText(rendered, Math.max(20, width - 4))) lines.push(`    ${row}`);
+      const rendered = JSON.stringify(item.entry.data, null, 2); for (const row of rendered.split('\n')) lines.push(`    ${row}`);
     }
-    return this.scrolled(lines, height);
+    return this.scrolled(lines, height, width);
   }
 
-  private renderMessages(state: ReturnType<LiteRuntime['store']['snapshot']>, height: number): string[] {
+  private renderMessages(state: ReturnType<LiteRuntime['store']['snapshot']>, height: number, width: number): string[] {
     const groups = conversationGroups(state.messages); if (!groups.length) return [this.text('No conversations. Press m to send a message.', '暂无对话，按 m 发送消息。')];
-    const names = new Map(state.sessions.map((session) => [session.id, session.name])); const view = selectedViewport(groups, this.selected[this.tab], height); this.selected[this.tab] = view.selected;
-    return view.visible.map((group, index) => {
-      const selected = view.start + index === view.selected; const [a, b] = group.sessionIds; const preview = group.lastMessage.body.replace(/\s+/g, ' ');
-      return `${selected ? `${this.colors.selected}>` : ' '} ${names.get(a) || a} ↔ ${names.get(b) || b}  ${this.text('messages', '消息')}:${group.messages.length}  ${this.colors.muted}${preview}${reset}`;
+    const names = new Map(state.sessions.map((session) => [session.id, session.name])); this.selected[this.tab] = Math.max(0, Math.min(groups.length - 1, this.selected[this.tab]));
+    const cards = groups.map((group, index) => {
+      const [a, b] = group.sessionIds; const title = `${names.get(a) || a} ↔ ${names.get(b) || b}`;
+      return wrapTerminalLines([`${index === this.selected[this.tab] ? `${this.colors.selected}> ${title} ${reset}` : `  ${bold}${title}${reset}`}  ${this.colors.accent}${group.messages.length} ${this.text('messages', '条消息')}${reset}`, `    ${this.colors.muted}${group.lastMessage.body}${reset}`, ''], width);
     });
+    return this.cardViewport(cards, this.selected[this.tab], height);
   }
 
   private renderConversationDetail(id: string, height: number, width: number): string[] {
@@ -228,25 +265,29 @@ export class LiteTui {
     const lines = [`${bold}${names.get(a) || a} ↔ ${names.get(b) || b}${reset}`, `${this.text('Complete durable conversation', '完整永久对话')} · ${group.messages.length} ${this.text('messages', '条消息')}`, ''];
     for (const message of group.messages) {
       const sender = names.get(message.from) || message.from; lines.push(`${this.colors.accent}${sender}${reset}  ${this.colors.muted}${message.createdAt}${message.readAt ? ` · ${this.text('read', '已读')}` : ''}${reset}`);
-      for (const row of wrapText(message.body, Math.max(20, width - 4))) lines.push(`  ${row}`); lines.push('');
+      lines.push(`  ${message.body}`, '');
     }
-    return this.scrolled(lines, height);
+    return this.scrolled(lines, height, width);
   }
 
-  private renderDiff(height: number): string[] {
+  private renderDiff(height: number, width: number): string[] {
     const snapshot = this.diff.snapshot(); const lines = [`${bold}${this.text('Uncommitted workspace diff', '工作区未提交 Diff')}${reset}  ${this.colors.muted}${snapshot.updatedAt || ''}${snapshot.loading ? ` · ${this.text('refreshing', '刷新中')}` : ''}${reset}`];
     if (snapshot.error) lines.push(`${this.colors.bad}${snapshot.error}${reset}`);
     else if (!snapshot.lines.length) lines.push(this.text('Working tree is clean.', '工作区没有未提交更改。'));
     else for (const row of snapshot.lines) lines.push(row.startsWith('+') && !row.startsWith('+++') ? `${this.colors.good}${row}${reset}` : row.startsWith('-') && !row.startsWith('---') ? `${this.colors.bad}${row}${reset}` : row.startsWith('@@') ? `${this.colors.accent}${row}${reset}` : row.startsWith('diff --git') ? `${bold}${row}${reset}` : row);
     if (snapshot.truncated) lines.push(`${this.colors.warn}${this.text('Diff capture truncated at safety limit.', 'Diff 已达到安全上限并截断。')}${reset}`);
-    return this.scrolled(lines, height);
+    return this.scrolled(lines, height, width);
   }
 
-  private renderExtensions(state: ReturnType<LiteRuntime['store']['snapshot']>, height: number): string[] {
-    const rows = [`${bold}${this.text('Custom extensions', '自定义扩展')}${reset}`]; if (!state.extensions.length) rows.push(this.text('No custom extensions. Press e to add one.', '暂无自定义扩展，按 e 新增。'));
-    const view = selectedViewport(state.extensions, this.selected[this.tab], Math.max(1, height - 1)); this.selected[this.tab] = view.selected;
-    for (const [index, extension] of view.visible.entries()) rows.push(`${view.start + index === view.selected ? `${this.colors.selected}>` : ' '} ${extension.name}  ${extension.title}  ${this.colors.muted}${extension.handler.kind}${reset}`);
-    return rows;
+  private renderExtensions(state: ReturnType<LiteRuntime['store']['snapshot']>, height: number, width: number): string[] {
+    if (!state.extensions.length) return [`${bold}${this.text('Custom extensions', '自定义扩展')}${reset}`, this.text('No custom extensions. Press e to add one.', '暂无自定义扩展，按 e 新增。')];
+    this.selected[this.tab] = Math.max(0, Math.min(state.extensions.length - 1, this.selected[this.tab]));
+    const cards = state.extensions.map((extension, index) => wrapTerminalLines([
+      `${index === this.selected[this.tab] ? `${this.colors.selected}> ${extension.name} ${reset}` : `  ${bold}${extension.name}${reset}`}  ${this.colors.accent}${extension.handler.kind}${reset}`,
+      `    ${extension.title}`,
+      `    ${this.colors.muted}${extension.description}${reset}`, '',
+    ], width));
+    return this.cardViewport(cards, this.selected[this.tab], height);
   }
 
   private renderSettings(): string[] {
@@ -258,25 +299,37 @@ export class LiteTui {
       '', `${this.colors.warn}${this.text('Rotating credentials disconnects existing Apps and Actions clients.', '轮换凭据会使现有 Apps 与 Actions 连接失效。')}${reset}`];
   }
 
-  private renderLogs(height: number): string[] {
+  private renderLogs(height: number, width: number): string[] {
     const lines = [`${bold}${this.text('Runtime logs', '运行日志')}${reset}  ${this.showAuditFacts ? `${this.colors.good}${this.text('audit facts ON', '事实调用 已开启')}${reset}` : `${this.colors.muted}${this.text('audit facts OFF', '事实调用 已关闭')}${reset}`}`];
     const entries = this.runtime.logs.map((entry) => ({ at: entry.at, line: `${entry.level === 'error' ? this.colors.bad : this.colors.muted}${entry.at} ${entry.level.toUpperCase()}${reset} ${entry.message}` }));
     if (this.showAuditFacts) for (const fact of this.runtime.store.auditFacts(2000)) entries.push({ at: fact.at, line: `${this.colors.accent}${fact.at} FACT${reset} ${fact.sessionName} · ${fact.tool} · ${fact.ok ? 'OK' : fact.errorCode || 'ERROR'} · ${fact.durationMs}ms  ${JSON.stringify(fact.args)}` });
     lines.push(...entries.sort((a, b) => b.at.localeCompare(a.at)).map((entry) => entry.line));
-    return this.scrolled(lines, height);
+    return this.scrolled(lines, height, width);
   }
 
-  private scrolled(lines: string[], height: number): string[] {
-    const max = Math.max(0, lines.length - height); this.scroll[this.tab] = Math.min(max, Math.max(0, this.scroll[this.tab]));
-    return lines.slice(this.scroll[this.tab], this.scroll[this.tab] + height);
+  private scrolled(lines: string[], height: number, width: number): string[] {
+    const wrapped = wrapTerminalLines(lines, width); const max = Math.max(0, wrapped.length - height);
+    this.scroll[this.tab] = Math.min(max, Math.max(0, this.scroll[this.tab]));
+    return wrapped.slice(this.scroll[this.tab], this.scroll[this.tab] + height);
+  }
+
+  private cardViewport(cards: string[][], selected: number, height: number): string[] {
+    const offsets: number[] = []; let total = 0;
+    for (const card of cards) { offsets.push(total); total += card.length; }
+    const start = offsets[selected] || 0; const end = start + (cards[selected]?.length || 1);
+    let scroll = Math.min(Math.max(0, total - height), Math.max(0, this.scroll[this.tab]));
+    if (start < scroll) scroll = start;
+    else if (end > scroll + height) scroll = Math.min(start, Math.max(0, end - height));
+    this.scroll[this.tab] = scroll;
+    return cards.flat().slice(scroll, scroll + height);
   }
 
   private async ask(questions: Array<{ label: string; fallback?: string }>, preamble: string[] = []): Promise<string[]> {
-    this.prompting = true; stdin.off('keypress', this.onKeypress); stdin.setRawMode(false); stdout.write(`${wrap}${ESC}?25h${clear}${bold}LocalTerminal Lite · ${this.text('Input', '输入')}${reset}\n${'─'.repeat(Math.max(40, stdout.columns || 80))}\n`);
-    if (preamble.length) stdout.write(`${preamble.join('\n')}\n${'─'.repeat(Math.max(40, stdout.columns || 80))}\n`);
+    this.prompting = true; stdin.off('keypress', this.onKeypress); stdin.off('data', this.onRawInput); stdin.setRawMode(false); stdout.write(`${mouseOff}${wrap}${ESC}?25h${clear}${bold}LocalTerminal Lite · ${this.text('Input', '输入')}${reset}\n${'─'.repeat(Math.max(40, stdout.columns || 80))}\n`);
+    if (preamble.length) stdout.write(`${wrapTerminalLines(preamble, Math.max(40, stdout.columns || 80)).join('\n')}\n${'─'.repeat(Math.max(40, stdout.columns || 80))}\n`);
     const rl = createInterface({ input: stdin, output: stdout }); const answers: string[] = [];
     try { for (const question of questions) { const answer = await rl.question(`${question.label}${question.fallback ? ` [${question.fallback}]` : ''}: `); answers.push(answer.trim() || question.fallback || ''); } }
-    finally { rl.close(); emitKeypressEvents(stdin); stdin.setRawMode(true); stdin.resume(); stdin.on('keypress', this.onKeypress); stdout.write(`${noWrap}${ESC}?25l${clear}`); this.prompting = false; }
+    finally { rl.close(); emitKeypressEvents(stdin); stdin.setRawMode(true); stdin.resume(); stdin.on('keypress', this.onKeypress); stdin.prependListener('data', this.onRawInput); stdout.write(`${noWrap}${mouseOn}${ESC}?25l${clear}`); this.prompting = false; }
     return answers;
   }
 
@@ -414,6 +467,6 @@ export class LiteTui {
   }
 
   private async shutdown(): Promise<void> {
-    if (this.stopped) return; this.stopped = true; if (this.timer) clearInterval(this.timer); this.diff.stop(); stdin.off('keypress', this.onKeypress); stdin.setRawMode(false); stdin.pause(); stdout.write(`${wrap}${ESC}?25h${ESC}?1049l`); await this.runtime.close();
+    if (this.stopped) return; this.stopped = true; if (this.timer) clearInterval(this.timer); this.diff.stop(); stdin.off('keypress', this.onKeypress); stdin.off('data', this.onRawInput); stdin.setRawMode(false); stdin.pause(); stdout.write(`${mouseOff}${wrap}${ESC}?25h${ESC}?1049l`); await this.runtime.close();
   }
 }
