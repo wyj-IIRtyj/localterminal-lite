@@ -46,6 +46,9 @@ const extensionToolInput = z.object({
   body: z.string().optional(),
   markRead: z.boolean().optional(),
   limit: z.number().int().optional(),
+  offset: z.number().int().optional(),
+  includeAncestors: z.boolean().optional(),
+  with: z.string().optional(),
   path: z.string().optional(),
   command: z.string().optional(),
   cwd: z.string().optional(),
@@ -96,7 +99,17 @@ function contextFromCall(callContext: unknown): InvocationContext {
 }
 
 export function createMcpServer(service: ExtensionService): McpServer {
-  const server = new McpServer({ name: 'localterminal-lite', version: '0.2.0' });
+  const server = new McpServer({ name: 'localterminal-lite', version: '0.3.0' }, {
+    instructions: [
+      'LocalTerminal Lite sessions are auditable work contexts, not ChatGPT conversation IDs.',
+      'Before work, create a root with session_register(mode=root), or claim an unfinished/released session with session_inherit(sessionId, claimCode).',
+      'Do not use session_inherit to continue completed work: completed sessions are immutable; create session_register(mode=root, continuesSessionId) or delegate a same-level continuation.',
+      'For controller handoff, call session_release to obtain a one-time claimCode, then let the next controller call session_inherit.',
+      'Pass identity={sessionId,sessionToken} on authenticated calls and finish every work turn with session_checkpoint.',
+      'message_list covers both sent and received messages; message_conversation returns a two-way thread. Recipients accept session name or ID.',
+      'Automatic continuation context is intentionally bounded. Use paginated session_history for permanent structured summaries, messages, state events, and sanitized tool calls.',
+    ].join('\n'),
+  });
   server.registerTool('extension_discover', {
     title: 'Discover extension tools',
     description: 'Use first to learn all concrete tools available behind LocalTerminal Lite, how to call them, and how to validate/register custom tools.',

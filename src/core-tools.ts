@@ -316,6 +316,11 @@ export function createBuiltinTools(config: LiteConfig, store: LiteStore): Map<st
     invoke: async (_input, context) => ({ context: store.context(actor(context).id) }),
   });
   add({
+    name: 'session_history', title: 'Read paginated session history', description: 'Read permanent structured history for the authenticated session and its continuation ancestors without overloading context.',
+    inputSchema: { type: 'object', properties: { offset: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 500 }, includeAncestors: { type: 'boolean', default: true } }, additionalProperties: false }, annotations: readOnly,
+    invoke: async (input, context) => ({ history: store.historyPage(actor(context).id, typeof input.offset === 'number' ? input.offset : 0, typeof input.limit === 'number' ? input.limit : 100, input.includeAncestors !== false) }),
+  });
+  add({
     name: 'session_release', title: 'Release session', description: 'Release the current controller and issue a new one-time handoff code.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false }, annotations: mutating,
     invoke: async (_input, context) => { const result = store.release(actor(context).id); return { session: publicSession(result.session), claimCode: result.claimCode, handoffPrompt: result.handoffPrompt }; },
@@ -341,7 +346,7 @@ export function createBuiltinTools(config: LiteConfig, store: LiteStore): Map<st
     invoke: async (input, context) => ({ acknowledged: store.acknowledgeEvents(actor(context).id, input.eventIds as string[]) }),
   });
   add({
-    name: 'message_send', title: 'Send session message', description: 'Send a durable message as the authenticated session; sender cannot be overridden.',
+    name: 'message_send', title: 'Send session message', description: 'Send a durable message as the authenticated session to a recipient session name or ID; sender cannot be overridden.',
     inputSchema: { type: 'object', properties: { to: { type: 'string', minLength: 1 }, body: { type: 'string', minLength: 1, maxLength: 20_000 } }, required: ['to', 'body'], additionalProperties: false }, annotations: mutating,
     invoke: async (input, context) => ({ message: store.sendMessage(actor(context).id, asString(input.to, 'to'), asString(input.body, 'body')) }),
   });
@@ -351,9 +356,14 @@ export function createBuiltinTools(config: LiteConfig, store: LiteStore): Map<st
     invoke: async (input, context) => { const current = actor(context); return { session: publicSession(current), messages: store.inbox(current.id, input.markRead === true) }; },
   });
   add({
-    name: 'message_list', title: 'List own collaboration messages', description: 'Compatibility view of the authenticated session inbox only.',
+    name: 'message_list', title: 'List own collaboration messages', description: 'List recent inbound and outbound messages involving the authenticated session.',
     inputSchema: { type: 'object', properties: { limit: { type: 'integer', minimum: 1, maximum: 1000 } }, additionalProperties: false }, annotations: readOnly,
-    invoke: async (input, context) => { const current = actor(context); const messages = store.inbox(current.id); return { messages: messages.slice(-(typeof input.limit === 'number' ? input.limit : 100)) }; },
+    invoke: async (input, context) => { const current = actor(context); return { messages: store.messagesForSession(current.id, typeof input.limit === 'number' ? input.limit : 100) }; },
+  });
+  add({
+    name: 'message_conversation', title: 'Read two-way conversation', description: 'Read the complete recent two-way conversation between the authenticated session and another session selected by name or ID.',
+    inputSchema: { type: 'object', properties: { with: { type: 'string', minLength: 1 }, limit: { type: 'integer', minimum: 1, maximum: 5000 } }, required: ['with'], additionalProperties: false }, annotations: readOnly,
+    invoke: async (input, context) => ({ conversation: store.conversation(actor(context).id, asString(input.with, 'with'), typeof input.limit === 'number' ? input.limit : 1000) }),
   });
   return tools;
 }

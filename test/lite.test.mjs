@@ -3,8 +3,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { LiteRuntime } from '../dist/server.js';
 import { LiteStore, SESSION_TIMING } from '../dist/store.js';
+import { WorkspaceDiffTracker } from '../dist/diff.js';
+import { conversationGroups, logicalSessionGroups, selectedViewport } from '../dist/tui-model.js';
 import { createDefaultSettings, loadLiteConfig, readLiteSettings, saveLiteSettings, settingsPath } from '../dist/config.js';
 
 const CONNECTOR_KEY = 'test-connector-key-1234567890';
@@ -20,7 +23,7 @@ function tempWorkspace() {
 
 async function createRuntime() {
   const dirs = tempWorkspace();
-  const runtime = new LiteRuntime({ ...dirs, settingsPath: path.join(dirs.stateDir, 'test-settings.json'), host: '127.0.0.1', port: 0, connectorKey: CONNECTOR_KEY, actionsToken: ACTIONS_TOKEN, publicBaseUrl: 'http://127.0.0.1:0', maxOutputChars: 20_000, commandTimeoutSec: 10 });
+  const runtime = new LiteRuntime({ ...dirs, settingsPath: path.join(dirs.stateDir, 'test-settings.json'), host: '127.0.0.1', port: 0, connectorKey: CONNECTOR_KEY, actionsToken: ACTIONS_TOKEN, publicBaseUrl: 'http://127.0.0.1:0', maxOutputChars: 20_000, commandTimeoutSec: 10, uiLanguage: 'zh-CN', uiTheme: 'dark' });
   await runtime.start();
   return { runtime, dirs, baseUrl: `http://127.0.0.1:${runtime.port}`, async close() { await runtime.close(); fs.rmSync(dirs.workspaceDir, { recursive: true, force: true }); } };
 }
@@ -55,6 +58,8 @@ test('TUI settings persist outside workspace and placeholder environment values 
     assert.deepEqual(readLiteSettings(env), { ...settings, workspaceDir: fs.realpathSync(workspaceDir) });
     const config = loadLiteConfig(env); assert.equal(config.workspaceDir, fs.realpathSync(workspaceDir)); assert.equal(config.publicBaseUrl, 'http://127.0.0.1:3210');
     assert.equal(settingsPath(env), path.join(configDir, 'config.json')); assert.equal(fs.existsSync(path.join(workspaceDir, '.localterminal-lite', 'config.json')), false);
+    const legacy = { ...settings }; delete legacy.uiLanguage; delete legacy.uiTheme; fs.writeFileSync(settingsPath(env), JSON.stringify(legacy));
+    assert.equal(readLiteSettings(env).uiLanguage, 'zh-CN'); assert.equal(readLiteSettings(env).uiTheme, 'dark');
   } finally { fs.rmSync(workspaceDir, { recursive: true, force: true }); fs.rmSync(configDir, { recursive: true, force: true }); }
 });
 
@@ -91,6 +96,9 @@ test('Actions identity, delegation, messages, ACK, completion audit, and continu
     assert.equal(secondClaim.body.error.code, 'SESSION_ALREADY_CLAIMED');
     const sent = await call(server, 'message_send', { to: main.session.id, body: 'Child progress is ready.' }, childIdentity);
     assert.equal(sent.body.ok, true);
+    const reply = await call(server, 'message_send', { to: 'worker', body: 'Root acknowledges the update.' }, mainIdentity); assert.equal(reply.body.ok, true);
+    const messageList = await call(server, 'message_list', {}, childIdentity); assert.deepEqual(messageList.body.data.result.messages.map((message) => message.body), ['Child progress is ready.', 'Root acknowledges the update.']);
+    const conversation = await call(server, 'message_conversation', { with: 'main' }, childIdentity); assert.equal(conversation.body.data.result.conversation.messages.length, 2);
     const rootContext1 = await call(server, 'session_context', {}, mainIdentity);
     const rootEvents = rootContext1.body.events; assert.ok(rootEvents.length <= 5); assert.ok(rootEvents.some((event) => event.kind === 'message'));
     const rootContext2 = await call(server, 'session_context', {}, mainIdentity);
@@ -108,7 +116,34 @@ test('Actions identity, delegation, messages, ACK, completion audit, and continu
     const continuation = await root(server, 'main-followup', main.session.id);
     assert.equal(continuation.session.continuesSessionId, main.session.id); assert.equal(continuation.session.parentSessionId, undefined);
     assert.equal(continuation.context.inheritedFrom.id, main.session.id); assert.equal(continuation.context.inheritedFrom.finalSummary, 'Reviewed all child work and completed the root objective.');
+    const permanentHistory = await call(server, 'session_history', { limit: 500, includeAncestors: true }, continuation.identity);
+    assert.ok(permanentHistory.body.data.result.history.entries.some((entry) => entry.sessionId === main.session.id && entry.type === 'checkpoint'));
   } finally { await server.close(); }
+});
+
+test('TUI model collapses continuation records and groups two-way conversations with stable scrolling', () => {
+  const dirs = tempWorkspace(); const store = new LiteStore(dirs.stateDir);
+  try {
+    const first = store.registerRoot({ name: 'logical-a' }); store.checkpoint(first.session.id, { phase: 'completed', summary: 'first complete' });
+    const continuation = store.registerRoot({ name: 'logical-a-next', continuesSessionId: first.session.id }); const independent = store.registerRoot({ name: 'logical-b' });
+    store.sendMessage(continuation.session.id, independent.session.id, 'one'); store.sendMessage(independent.session.id, continuation.session.id, 'two');
+    const groups = logicalSessionGroups(store.listSessions()); assert.equal(groups.length, 2);
+    const chain = groups.find((group) => group.id === first.session.id); assert.equal(chain.sessions.length, 2); assert.equal(chain.current.id, continuation.session.id);
+    const conversations = conversationGroups(store.snapshot().messages); assert.equal(conversations.length, 1); assert.equal(conversations[0].messages.length, 2);
+    assert.deepEqual(selectedViewport(['a', 'b', 'c', 'd'], 3, 2), { selected: 3, start: 2, visible: ['c', 'd'] });
+  } finally { fs.rmSync(dirs.workspaceDir, { recursive: true, force: true }); }
+});
+
+test('workspace diff tracker includes tracked and untracked changes while excluding Lite state', async () => {
+  const dirs = tempWorkspace();
+  try {
+    execFileSync('git', ['init'], { cwd: dirs.workspaceDir }); execFileSync('git', ['config', 'user.email', 'lite@example.test'], { cwd: dirs.workspaceDir }); execFileSync('git', ['config', 'user.name', 'Lite Test'], { cwd: dirs.workspaceDir });
+    execFileSync('git', ['add', 'hello.txt'], { cwd: dirs.workspaceDir }); execFileSync('git', ['commit', '-m', 'baseline'], { cwd: dirs.workspaceDir });
+    fs.writeFileSync(path.join(dirs.workspaceDir, 'hello.txt'), 'changed lite\n'); fs.writeFileSync(path.join(dirs.workspaceDir, 'new.txt'), 'new line\n'); fs.writeFileSync(path.join(dirs.stateDir, 'internal.txt'), 'hidden\n');
+    const tracker = new WorkspaceDiffTracker({ ...dirs, settingsPath: '', host: '127.0.0.1', port: 0, connectorKey: CONNECTOR_KEY, actionsToken: ACTIONS_TOKEN, publicBaseUrl: '', maxOutputChars: 20_000, commandTimeoutSec: 10, uiLanguage: 'en', uiTheme: 'dark' });
+    await tracker.refresh(); const diff = tracker.snapshot(); const text = diff.lines.join('\n');
+    assert.match(text, /-hello lite/); assert.match(text, /\+changed lite/); assert.match(text, /diff --git a\/new.txt b\/new.txt/); assert.doesNotMatch(text, /internal.txt/);
+  } finally { fs.rmSync(dirs.workspaceDir, { recursive: true, force: true }); }
 });
 
 test('only roots delegate, multiple children coexist, and TUI revoke invalidates old controller', async () => {
@@ -193,7 +228,8 @@ test('Apps exposes only three tools and binds openai/session only after explicit
   const server = await createRuntime();
   try {
     const url = `${server.baseUrl}/mcp/${CONNECTOR_KEY}`;
-    const init = await rpcPost(url, { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'lite-test', version: '0.2.0' } } });
+    const init = await rpcPost(url, { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'lite-test', version: '0.3.0' } } });
+    assert.match(init.data.result.instructions, /Do not use session_inherit to continue completed work/); assert.match(init.data.result.instructions, /message_conversation/);
     const listed = await rpcPost(url, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }, init.sessionId);
     assert.deepEqual(listed.data.result.tools.map((tool) => tool.name).sort(), ['extension_call', 'extension_discover', 'extension_register']);
     const anonymous = await rpcPost(url, { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'extension_discover', arguments: {}, _meta: { 'openai/session': 'chat-a' } } }, init.sessionId);

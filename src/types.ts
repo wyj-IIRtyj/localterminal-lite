@@ -146,6 +146,8 @@ export type LiteSettings = {
   publicBaseUrl: string;
   maxOutputChars: number;
   commandTimeoutSec: number;
+  uiLanguage: 'en' | 'zh-CN';
+  uiTheme: 'dark' | 'light';
 };
 
 export type LiteConfig = {
@@ -159,7 +161,11 @@ export type LiteConfig = {
   publicBaseUrl: string;
   maxOutputChars: number;
   commandTimeoutSec: number;
+  uiLanguage: 'en' | 'zh-CN';
+  uiTheme: 'dark' | 'light';
 };
+
+export type SessionHistoryEntry = { at: string; type: string; data: JsonObject };
 
 export type InvocationContext = {
   identity?: SessionIdentity;

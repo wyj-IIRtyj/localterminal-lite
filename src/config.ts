@@ -59,6 +59,8 @@ export function createDefaultSettings(workspaceDir = defaultWorkspaceForCwd()): 
     publicBaseUrl: '',
     maxOutputChars: 120_000,
     commandTimeoutSec: 60,
+    uiLanguage: 'zh-CN',
+    uiTheme: 'dark',
   };
 }
 
@@ -71,6 +73,8 @@ export function validateSettings(settings: LiteSettings): string[] {
   if (typeof settings.connectorKey !== 'string' || typeof settings.actionsToken !== 'string' || settings.connectorKey.length < 24 || settings.actionsToken.length < 24) errors.push('Connector and Actions credentials must contain at least 24 characters.');
   if (!Number.isInteger(settings.maxOutputChars) || settings.maxOutputChars < 4_000 || settings.maxOutputChars > 1_000_000) errors.push('Maximum output must be from 4000 to 1000000 characters.');
   if (!Number.isInteger(settings.commandTimeoutSec) || settings.commandTimeoutSec < 1 || settings.commandTimeoutSec > 3600) errors.push('Command timeout must be from 1 to 3600 seconds.');
+  if (!['en', 'zh-CN'].includes(settings.uiLanguage)) errors.push('UI language must be en or zh-CN.');
+  if (!['dark', 'light'].includes(settings.uiTheme)) errors.push('UI theme must be dark or light.');
   return errors;
 }
 
@@ -79,7 +83,7 @@ export function readLiteSettings(env: NodeJS.ProcessEnv = process.env): LiteSett
   if (!existsSync(configPath)) return undefined;
   const parsed = JSON.parse(readFileSync(configPath, 'utf8')) as Partial<LiteSettings>;
   if (parsed.schemaVersion !== 1) throw new Error(`Unsupported Lite settings format: ${configPath}`);
-  const settings = parsed as LiteSettings;
+  const settings = { uiLanguage: 'zh-CN', uiTheme: 'dark', ...parsed } as LiteSettings;
   const errors = validateSettings(settings);
   if (errors.length) throw new Error(`Invalid Lite settings: ${errors.join(' ')}`);
   return settings;
@@ -147,6 +151,8 @@ export function loadLiteConfig(env: NodeJS.ProcessEnv = process.env): LiteConfig
     publicBaseUrl: publicBaseUrl.replace(/\/$/, ''),
     maxOutputChars: settings.maxOutputChars,
     commandTimeoutSec: settings.commandTimeoutSec,
+    uiLanguage: settings.uiLanguage,
+    uiTheme: settings.uiTheme,
   };
 }
 

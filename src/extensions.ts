@@ -69,7 +69,9 @@ export class ExtensionService {
           identityRequired: true,
           instructions: {
             root: 'Call extension_call with tool=session_register and input={mode:"root",name:"..."}. Save the returned sessionId + sessionToken.',
-            inherit: 'To take over assigned work, call extension_call with tool=session_inherit and input={sessionId,claimCode}.',
+            inherit: 'Resume/claim existing unfinished or released work with session_inherit(sessionId,claimCode). It does not continue a completed session.',
+            continue: 'Continue immutable completed work by creating session_register(mode=root,continuesSessionId), or a delegated same-level continuation.',
+            handoff: 'Handoff a live session with session_release; give its one-time claimCode to the next controller, which then calls session_inherit.',
             next: 'After identity is established, pass identity={sessionId,sessionToken} on every Actions facade call. Apps may omit it only after a verified openai/session binding exists.',
           },
           bootstrapTools: ['session_register(mode=root)', 'session_inherit(sessionId,claimCode)'],
@@ -91,6 +93,7 @@ export class ExtensionService {
           register: 'Call extension_register with action=validate before action=upsert.',
           call: 'Call extension_call with exact tool name, identity, and input. End each work turn with session_checkpoint.',
           collaboration: 'Roots delegate direct children with a structured task. Children claim via session_inherit, exchange messages, checkpoint, and complete.',
+          history: 'Continuation context is bounded by design. Use paginated session_history for permanent structured history. message_list includes sent and received messages; message_conversation returns one two-way thread. Session names or IDs are accepted for recipients.',
         },
         registrationSchema: {
           name: 'lower_snake_case, 3-64 characters', title: 'human-readable title', description: 'when to use the tool and what it changes',

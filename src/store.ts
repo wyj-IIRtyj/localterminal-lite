@@ -4,6 +4,7 @@ import path from 'node:path';
 import type {
   AppSessionBinding, CustomExtensionSpec, JsonObject, LiteMessage, LiteSession, SessionCheckpoint,
   SessionEvent, SessionEventKind, SessionIdentity, SessionPhase, StoredState, TaskPackage,
+  SessionHistoryEntry,
 } from './types.js';
 
 const EMPTY_STATE: StoredState = {
@@ -74,6 +75,7 @@ export class LiteStore {
   private readonly statePath: string;
   private readonly historyDir: string;
   private readonly transientClaimCodes = new Map<string, string>();
+  private auditCache?: Array<{ sessionId: string; sessionName: string; at: string; tool: string; ok: boolean; durationMs: number; errorCode?: string; args: unknown }>;
 
   constructor(stateDir: string, private readonly now: () => number = Date.now) {
     this.statePath = path.join(stateDir, 'state.json');
@@ -338,11 +340,56 @@ export class LiteStore {
 
   listMessages(limit = 100): LiteMessage[] { return structuredClone(this.state.messages.slice(-Math.max(1, Math.min(1000, limit)))); }
 
+  messagesForSession(sessionId: string, limit = 100): LiteMessage[] {
+    const session = this.requireSession(sessionId);
+    return structuredClone(this.state.messages.filter((message) => message.from === session.id || message.to === session.id).slice(-Math.max(1, Math.min(1000, limit))));
+  }
+
+  conversation(sessionId: string, otherSessionId: string, limit = 1000): { sessions: JsonObject[]; messages: LiteMessage[] } {
+    const session = this.requireSession(sessionId);
+    const other = this.requireSession(otherSessionId);
+    const messages = this.state.messages.filter((message) =>
+      (message.from === session.id && message.to === other.id) || (message.from === other.id && message.to === session.id));
+    return { sessions: [publicSession(session), publicSession(other)], messages: structuredClone(messages.slice(-Math.max(1, Math.min(5000, limit)))) };
+  }
+
+  historyPage(sessionId: string, offset = 0, limit = 100, includeAncestors = true): { total: number; offset: number; nextOffset?: number; entries: JsonObject[] } {
+    const current = this.requireSession(sessionId);
+    const sessions: LiteSession[] = [];
+    const seen = new Set<string>();
+    let cursor: LiteSession | undefined = current;
+    while (cursor && !seen.has(cursor.id)) {
+      sessions.unshift(cursor); seen.add(cursor.id);
+      cursor = includeAncestors && cursor.continuesSessionId ? this.findSession(cursor.continuesSessionId) : undefined;
+    }
+    const entries = sessions.flatMap((session) => this.readHistory(session.id).map((entry) => ({ sessionId: session.id, sessionName: session.name, ...entry })));
+    const start = Math.max(0, Math.min(entries.length, offset));
+    const count = Math.max(1, Math.min(500, limit));
+    return { total: entries.length, offset: start, nextOffset: start + count < entries.length ? start + count : undefined, entries: structuredClone(entries.slice(start, start + count)) };
+  }
+
+  historiesForTui(sessionIds: string[]): Array<{ sessionId: string; sessionName: string; entry: SessionHistoryEntry }> {
+    return sessionIds.flatMap((id) => {
+      const session = this.requireSession(id);
+      return this.readHistory(session.id).map((entry) => ({ sessionId: session.id, sessionName: session.name, entry }));
+    });
+  }
+
+  auditFacts(limit = 500): Array<{ sessionId: string; sessionName: string; at: string; tool: string; ok: boolean; durationMs: number; errorCode?: string; args: unknown }> {
+    this.auditCache ||= this.state.sessions.flatMap((session) => this.readHistory(session.id)
+      .filter((entry) => entry.type === 'tool_audit')
+      .map((entry) => ({ sessionId: session.id, sessionName: session.name, at: entry.at, ...(entry.data as { tool: string; ok: boolean; durationMs: number; errorCode?: string; args: unknown }) })))
+      .sort((a, b) => a.at.localeCompare(b.at));
+    return structuredClone(this.auditCache.slice(-Math.max(1, Math.min(5000, limit))));
+  }
+
   audit(sessionId: string, entry: { tool: string; startedAt: string; durationMs: number; ok: boolean; errorCode?: string; args: JsonObject }): void {
+    const session = this.requireSession(sessionId);
     const sanitized = this.sanitize(entry.args);
     const encoded = JSON.stringify(sanitized);
     const args = encoded.length <= 4000 ? sanitized : { truncated: true, preview: encoded.slice(0, 3800) };
     this.appendHistory(sessionId, 'tool_audit', { ...entry, args });
+    if (this.auditCache) this.auditCache.push({ sessionId: session.id, sessionName: session.name, at: this.iso(), tool: entry.tool, ok: entry.ok, durationMs: entry.durationMs, errorCode: entry.errorCode, args });
   }
 
   context(sessionId: string): JsonObject {
@@ -419,6 +466,7 @@ export class LiteStore {
     this.state.appBindings = this.state.appBindings.filter((item) => !deleted.has(item.sessionId));
     for (const item of this.state.sessions) if (item.continuesSessionId && deleted.has(item.continuesSessionId)) item.predecessorDeleted = true;
     for (const id of deleted) { rmSync(this.historyPath(id), { force: true }); this.transientClaimCodes.delete(id); }
+    if (this.auditCache) this.auditCache = this.auditCache.filter((item) => !deleted.has(item.sessionId));
     this.save();
     return { deleted: [...deleted] };
   }
@@ -511,7 +559,7 @@ export class LiteStore {
   private appendHistory(sessionId: string, type: string, data: JsonObject): void {
     appendFileSync(this.historyPath(sessionId), `${JSON.stringify({ at: this.iso(), type, data })}\n`, { mode: 0o600 });
   }
-  private readHistory(sessionId: string): Array<{ at: string; type: string; data: JsonObject }> {
+  private readHistory(sessionId: string): SessionHistoryEntry[] {
     const file = this.historyPath(sessionId);
     if (!existsSync(file)) return [];
     return readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean).flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } });

@@ -1,6 +1,6 @@
 {
   "name": "localterminal-mcp-lite",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Lite local WebDev MCP with dual-session collaboration, Apps and Actions adapters, extension tools, and a terminal UI.",
   "type": "module",
