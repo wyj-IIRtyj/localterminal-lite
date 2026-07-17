@@ -1,9 +1,10 @@
 import { emitKeypressEvents } from 'node:readline';
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
-import type { CustomExtensionSpec, SessionStatus } from './types.js';
+import path from 'node:path';
+import type { CustomExtensionSpec, LiteSettings, SessionStatus } from './types.js';
 import type { LiteRuntime } from './server.js';
-import { maskCredential } from './config.js';
+import { maskCredential, readLiteSettings, rotateLiteCredentials, validateSettings } from './config.js';
 
 const ESC = '\u001b[';
 const clear = `${ESC}2J${ESC}H`;
@@ -15,8 +16,11 @@ const yellow = `${ESC}33m`;
 const red = `${ESC}31m`;
 const reset = `${ESC}0m`;
 
-type Tab = 'Overview' | 'Sessions' | 'Messages' | 'Extensions' | 'Logs';
-const TABS: Tab[] = ['Overview', 'Sessions', 'Messages', 'Extensions', 'Logs'];
+type Tab = 'Overview' | 'Sessions' | 'Messages' | 'Extensions' | 'Settings' | 'Logs';
+const TABS: Tab[] = ['Overview', 'Sessions', 'Messages', 'Extensions', 'Settings', 'Logs'];
+
+export type RuntimeReconfigureResult = { runtime: LiteRuntime; error?: string };
+export type RuntimeReconfigure = (settings: LiteSettings) => Promise<RuntimeReconfigureResult>;
 
 function truncate(value: string, length: number): string {
   if (value.length <= length) return value;
@@ -27,13 +31,61 @@ function line(char = '─'): string {
   return char.repeat(Math.max(20, Math.min(120, stdout.columns || 100)));
 }
 
+function integer(value: string, fallback: number): number {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+export async function runSetupTui(defaults: LiteSettings): Promise<LiteSettings> {
+  if (!stdin.isTTY || !stdout.isTTY) throw new Error('First launch requires the TUI. Run `npm run dev` in an interactive terminal.');
+  stdout.write(`${ESC}?1049h${ESC}?25h${clear}`);
+  const rl = createInterface({ input: stdin, output: stdout });
+  try {
+    let feedback = '';
+    while (true) {
+      stdout.write(`${clear}${bold}${cyan}LocalTerminal Lite · First-run setup${reset}\n${line()}\n`);
+      stdout.write('Configure the complete runtime here. Press Enter to accept each default.\n');
+      stdout.write('A public URL is optional until you connect an HTTPS tunnel. Credentials are generated automatically.\n');
+      if (feedback) stdout.write(`${red}${feedback}${reset}\n`);
+      stdout.write('\n');
+      const workspace = (await rl.question(`Workspace directory [${defaults.workspaceDir}]: `)).trim() || defaults.workspaceDir;
+      const host = (await rl.question(`Listen host [${defaults.host}]: `)).trim() || defaults.host;
+      const portAnswer = (await rl.question(`Listen port [${defaults.port}]: `)).trim();
+      const publicUrl = (await rl.question('Public HTTPS base URL (optional): ')).trim();
+      const outputAnswer = (await rl.question(`Maximum command output characters [${defaults.maxOutputChars}]: `)).trim();
+      const timeoutAnswer = (await rl.question(`Command timeout seconds [${defaults.commandTimeoutSec}]: `)).trim();
+      const candidate: LiteSettings = {
+        ...defaults,
+        workspaceDir: path.resolve(workspace),
+        host,
+        port: integer(portAnswer, defaults.port),
+        publicBaseUrl: publicUrl.replace(/\/$/, ''),
+        maxOutputChars: integer(outputAnswer, defaults.maxOutputChars),
+        commandTimeoutSec: integer(timeoutAnswer, defaults.commandTimeoutSec),
+      };
+      const errors = validateSettings(candidate);
+      if (errors.length) {
+        feedback = errors.join(' ');
+        continue;
+      }
+      const confirm = (await rl.question('\nSave and start? [Y/n]: ')).trim().toLowerCase();
+      if (!confirm || confirm === 'y' || confirm === 'yes') return candidate;
+      feedback = 'Setup was not saved. Update the values below.';
+    }
+  } finally {
+    rl.close();
+    stdout.write(`${ESC}?25h${ESC}?1049l`);
+  }
+}
+
 export class LiteTui {
   private tab = 0;
   private timer?: NodeJS.Timeout;
   private prompting = false;
   private stopped = false;
+  private revealCredentials = false;
 
-  constructor(private readonly runtime: LiteRuntime) {}
+  constructor(private runtime: LiteRuntime, private readonly reconfigure: RuntimeReconfigure) {}
 
   async run(): Promise<void> {
     if (!stdin.isTTY || !stdout.isTTY) throw new Error('Interactive TUI requires a TTY. Use --headless for service mode.');
@@ -61,7 +113,7 @@ export class LiteTui {
         await this.shutdown();
         return;
       }
-      if (key.name && /^[1-5]$/.test(key.name)) this.tab = Number(key.name) - 1;
+      if (key.name && /^[1-6]$/.test(key.name)) this.tab = Number(key.name) - 1;
       else if (key.name === 'tab' || key.name === 'right') this.tab = (this.tab + 1) % TABS.length;
       else if (key.name === 'left') this.tab = (this.tab + TABS.length - 1) % TABS.length;
       else if (key.name === 'n') await this.promptNewSession();
@@ -69,6 +121,9 @@ export class LiteTui {
       else if (key.name === 'u') await this.promptSessionUpdate();
       else if (key.name === 'e') await this.promptExtension();
       else if (key.name === 'x') await this.promptExtensionRemove();
+      else if (key.name === 'c') await this.promptSettings();
+      else if (key.name === 'k') await this.promptCredentialRotation();
+      else if (key.name === 'v') this.revealCredentials = !this.revealCredentials;
     } catch (error) {
       this.runtime.log(error instanceof Error ? error.message : String(error), 'error');
     }
@@ -89,8 +144,9 @@ export class LiteTui {
     if (this.tab === 1) output.push(...this.renderSessions(state));
     if (this.tab === 2) output.push(...this.renderMessages(state));
     if (this.tab === 3) output.push(...this.renderExtensions(state));
-    if (this.tab === 4) output.push(...this.renderLogs());
-    output.push(line(), `${dim}Keys: 1-5/tab switch  n new session  u update  m message  e register extension  x remove  q quit${reset}`);
+    if (this.tab === 4) output.push(...this.renderSettings());
+    if (this.tab === 5) output.push(...this.renderLogs());
+    output.push(line(), `${dim}Keys: 1-6/tab switch  n session  u update  m message  e extension  x remove  c configure  v credentials  k rotate  q quit${reset}`);
     const maxRows = Math.max(10, (stdout.rows || 35) - 1);
     stdout.write(output.slice(0, maxRows).map((item) => truncate(item, width + 40)).join('\n'));
   }
@@ -137,6 +193,26 @@ export class LiteTui {
     return rows;
   }
 
+  private renderSettings(): string[] {
+    const config = this.runtime.config;
+    return [
+      `${bold}Runtime settings${reset}`,
+      `  Settings file       ${config.settingsPath}`,
+      `  Workspace           ${config.workspaceDir}`,
+      `  Listen address      ${config.host}:${this.runtime.port}`,
+      `  Public base URL     ${config.publicBaseUrl}`,
+      `  Max output chars    ${config.maxOutputChars}`,
+      `  Command timeout     ${config.commandTimeoutSec}s`,
+      '',
+      `${bold}Connection credentials${reset}`,
+      `  Apps connector key  ${this.revealCredentials ? config.connectorKey : maskCredential(config.connectorKey)}`,
+      `  Actions token       ${this.revealCredentials ? config.actionsToken : maskCredential(config.actionsToken)}`,
+      '',
+      `${dim}c edits and applies settings immediately. v reveals credentials. k rotates both credentials.${reset}`,
+      `${yellow}Rotating credentials invalidates existing Apps and Actions connections.${reset}`,
+    ];
+  }
+
   private renderLogs(): string[] {
     const rows = [`${bold}Runtime logs${reset}`];
     for (const entry of this.runtime.logs.slice(-25).reverse()) rows.push(`  ${entry.level === 'error' ? red : dim}${entry.at} ${entry.level.toUpperCase()}${reset} ${truncate(entry.message, 90)}`);
@@ -147,7 +223,7 @@ export class LiteTui {
     this.prompting = true;
     stdin.off('keypress', this.onKeypress);
     stdin.setRawMode(false);
-    stdout.write(`${ESC}?25h${ESC}?1049l\n`);
+    stdout.write(`${ESC}?25h${clear}${bold}${cyan}LocalTerminal Lite · Input${reset}\n${line()}\n\n`);
     const rl = createInterface({ input: stdin, output: stdout });
     const answers: string[] = [];
     try {
@@ -159,8 +235,9 @@ export class LiteTui {
       rl.close();
       emitKeypressEvents(stdin);
       stdin.setRawMode(true);
+      stdin.resume();
       stdin.on('keypress', this.onKeypress);
-      stdout.write(`${ESC}?1049h${ESC}?25l`);
+      stdout.write(`${ESC}?25l${clear}`);
       this.prompting = false;
     }
     return answers;
@@ -230,6 +307,59 @@ export class LiteTui {
     if (!name) return;
     const result = await this.runtime.extensions.register({ action: 'remove', name });
     this.runtime.log(result.ok ? `Removed extension ${name}` : result.error?.message || 'Extension removal failed', result.ok ? 'info' : 'error');
+  }
+
+  private async promptSettings(): Promise<void> {
+    const current = readLiteSettings() || {
+      schemaVersion: 1 as const,
+      workspaceDir: this.runtime.config.workspaceDir,
+      host: this.runtime.config.host,
+      port: this.runtime.config.port,
+      connectorKey: this.runtime.config.connectorKey,
+      actionsToken: this.runtime.config.actionsToken,
+      publicBaseUrl: '',
+      maxOutputChars: this.runtime.config.maxOutputChars,
+      commandTimeoutSec: this.runtime.config.commandTimeoutSec,
+    };
+    const [workspace, host, port, publicUrl, maxOutput, timeout] = await this.ask([
+      { label: 'Workspace directory', fallback: current.workspaceDir },
+      { label: 'Listen host', fallback: current.host },
+      { label: 'Listen port', fallback: String(current.port) },
+      { label: 'Public HTTPS URL (enter "local" to clear)', fallback: current.publicBaseUrl || 'local' },
+      { label: 'Maximum output characters', fallback: String(current.maxOutputChars) },
+      { label: 'Command timeout seconds', fallback: String(current.commandTimeoutSec) },
+    ]);
+    const next: LiteSettings = {
+      ...current,
+      workspaceDir: path.resolve(workspace),
+      host,
+      port: integer(port, current.port),
+      publicBaseUrl: publicUrl.toLowerCase() === 'local' ? '' : publicUrl.replace(/\/$/, ''),
+      maxOutputChars: integer(maxOutput, current.maxOutputChars),
+      commandTimeoutSec: integer(timeout, current.commandTimeoutSec),
+    };
+    const errors = validateSettings(next);
+    if (errors.length) {
+      this.runtime.log(errors.join(' '), 'error');
+      return;
+    }
+    const result = await this.reconfigure(next);
+    this.runtime = result.runtime;
+    this.runtime.log(result.error || 'Runtime settings applied from TUI.', result.error ? 'error' : 'info');
+  }
+
+  private async promptCredentialRotation(): Promise<void> {
+    const [answer] = await this.ask([{ label: 'Rotate Apps and Actions credentials? yes|no', fallback: 'no' }]);
+    if (answer.toLowerCase() !== 'yes') return;
+    const current = readLiteSettings();
+    if (!current) {
+      this.runtime.log('Persistent settings are not available.', 'error');
+      return;
+    }
+    const result = await this.reconfigure(rotateLiteCredentials(current));
+    this.runtime = result.runtime;
+    this.revealCredentials = true;
+    this.runtime.log(result.error || 'Connection credentials rotated. Update Apps and Actions connections.', result.error ? 'error' : 'info');
   }
 
   private async shutdown(): Promise<void> {

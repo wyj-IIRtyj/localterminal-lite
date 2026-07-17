@@ -77,14 +77,20 @@ export type StoredState = {
   extensions: CustomExtensionSpec[];
 };
 
-export type LiteConfigFile = {
+export type LiteSettings = {
   schemaVersion: 1;
+  workspaceDir: string;
+  host: string;
+  port: number;
   connectorKey: string;
   actionsToken: string;
-  publicBaseUrl?: string;
+  publicBaseUrl: string;
+  maxOutputChars: number;
+  commandTimeoutSec: number;
 };
 
 export type LiteConfig = {
+  settingsPath: string;
   workspaceDir: string;
   stateDir: string;
   host: string;

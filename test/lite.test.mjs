@@ -4,6 +4,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { LiteRuntime } from '../dist/server.js';
+import {
+  createDefaultSettings,
+  loadLiteConfig,
+  readLiteSettings,
+  saveLiteSettings,
+  settingsPath,
+} from '../dist/config.js';
 
 const CONNECTOR_KEY = 'test-connector-key-1234567890';
 const ACTIONS_TOKEN = 'test-actions-token-12345678901234567890';
@@ -20,6 +27,7 @@ async function createRuntime() {
   const dirs = tempWorkspace();
   const runtime = new LiteRuntime({
     ...dirs,
+    settingsPath: path.join(dirs.stateDir, 'test-settings.json'),
     host: '127.0.0.1',
     port: 0,
     connectorKey: CONNECTOR_KEY,
@@ -48,6 +56,30 @@ function parseEventStreamJson(text) {
   assert.ok(dataLine, text);
   return JSON.parse(dataLine.slice(6));
 }
+
+test('TUI settings persist outside the workspace and template placeholders are ignored', () => {
+  const workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'localterminal-lite-config-workspace-'));
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'localterminal-lite-user-config-'));
+  const env = {
+    LITE_CONFIG_DIR: configDir,
+    LITE_WORKSPACE_DIR: '/absolute/path/to/project',
+    LITE_PUBLIC_BASE_URL: 'https://replace-with-your-tunnel.example',
+  };
+  try {
+    const settings = createDefaultSettings(workspaceDir);
+    saveLiteSettings(settings, env);
+    assert.deepEqual(readLiteSettings(env), { ...settings, workspaceDir: fs.realpathSync(workspaceDir) });
+    const config = loadLiteConfig(env);
+    assert.equal(config.workspaceDir, fs.realpathSync(workspaceDir));
+    assert.equal(config.publicBaseUrl, 'http://127.0.0.1:3210');
+    assert.equal(settingsPath(env), path.join(configDir, 'config.json'));
+    if (process.platform !== 'win32') assert.equal(fs.statSync(settingsPath(env)).mode & 0o777, 0o600);
+    assert.equal(fs.existsSync(path.join(workspaceDir, '.localterminal-lite', 'config.json')), false);
+  } finally {
+    fs.rmSync(workspaceDir, { recursive: true, force: true });
+    fs.rmSync(configDir, { recursive: true, force: true });
+  }
+});
 
 async function rpcPost(url, payload, sessionId) {
   const headers = { accept: 'application/json, text/event-stream', 'content-type': 'application/json' };

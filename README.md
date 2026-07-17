@@ -16,19 +16,22 @@ It intentionally does not include the Full edition's browser automation, desktop
 ```bash
 cd lite
 npm install
-cp .env.example .env
-# Edit LITE_WORKSPACE_DIR and, for a public tunnel, LITE_PUBLIC_BASE_URL.
 npm run dev
 ```
 
+首次启动会打开全屏配置向导。工作区、监听地址、公网 URL、运行限制和接入凭据都由 TUI 管理并持久化；不需要创建或编辑 `.env`。高级无界面部署可以通过进程环境变量临时覆盖设置。
+
 The TUI is the primary interface. It displays server endpoints and runtime state and supports:
 
-- `1`-`5` or Tab: switch views;
+- `1`-`6` or Tab: switch views;
 - `n`: register a session;
 - `u`: update session status;
 - `m`: send a message between sessions;
 - `e`: register a custom builtin alias;
 - `x`: remove a custom extension;
+- `c`: configure workspace, network, and runtime limits, then restart safely;
+- `v`: reveal or mask Apps and Actions credentials;
+- `k`: rotate both connection credentials;
 - `q`: stop the server.
 
 For a service process without terminal controls:
@@ -60,11 +63,7 @@ Import the OpenAPI URL printed by the TUI:
 https://your-public-domain.example/openapi.json
 ```
 
-Configure Bearer authentication with the Actions token stored in:
-
-```text
-<workspace>/.localterminal-lite/config.json
-```
+Configure Bearer authentication with the Actions token shown in the TUI's Settings view (`v` toggles visibility).
 
 The default document is OpenAPI 3.0.3 for broad GPT Actions compatibility and exposes exactly three operations: `extensionDiscover`, `extensionRegister`, and `extensionCall`. An equivalent OpenAPI 3.1 document is available at `/openapi-3.1.json`.
 

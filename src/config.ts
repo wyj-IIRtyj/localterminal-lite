@@ -1,51 +1,152 @@
 import { randomBytes } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
-import type { LiteConfig, LiteConfigFile } from './types.js';
+import type { LiteConfig, LiteSettings } from './types.js';
+
+const WORKSPACE_PLACEHOLDERS = new Set(['/absolute/path/to/project']);
+const PUBLIC_URL_PLACEHOLDERS = new Set(['https://replace-with-your-tunnel.example']);
 
 function boundedInteger(value: string | undefined, fallback: number, min: number, max: number): number {
   const parsed = Number.parseInt(value ?? '', 10);
   return Number.isFinite(parsed) ? Math.max(min, Math.min(max, parsed)) : fallback;
 }
 
-function readConfigFile(configPath: string): LiteConfigFile | undefined {
-  if (!existsSync(configPath)) return undefined;
-  const parsed = JSON.parse(readFileSync(configPath, 'utf8')) as Partial<LiteConfigFile>;
-  if (parsed.schemaVersion !== 1 || typeof parsed.connectorKey !== 'string' || typeof parsed.actionsToken !== 'string') {
-    throw new Error(`Invalid Lite config: ${configPath}`);
+function optionalEnv(value: string | undefined, placeholders: Set<string> = new Set()): string | undefined {
+  const candidate = value?.trim();
+  return candidate && !placeholders.has(candidate) ? candidate : undefined;
+}
+
+export function settingsPath(env: NodeJS.ProcessEnv = process.env): string {
+  const configured = optionalEnv(env.LITE_CONFIG_DIR);
+  const base = configured
+    ? path.resolve(configured)
+    : path.join(optionalEnv(env.XDG_CONFIG_HOME) || path.join(os.homedir(), '.config'), 'localterminal-lite');
+  return path.join(base, 'config.json');
+}
+
+export function defaultWorkspaceForCwd(cwd = process.cwd()): string {
+  const resolved = path.resolve(cwd);
+  if (path.basename(resolved) === 'lite') {
+    const parent = path.dirname(resolved);
+    if (existsSync(path.join(parent, 'package.json'))) return realpathSync(parent);
   }
-  return parsed as LiteConfigFile;
+  return existsSync(resolved) ? realpathSync(resolved) : resolved;
+}
+
+export function isDirectory(candidate: string): boolean {
+  return existsSync(candidate) && statSync(candidate).isDirectory();
+}
+
+export function isValidPublicBaseUrl(value: string): boolean {
+  if (!value) return true;
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === 'https:' || (parsed.protocol === 'http:' && ['127.0.0.1', 'localhost', '::1'].includes(parsed.hostname));
+  } catch {
+    return false;
+  }
+}
+
+export function createDefaultSettings(workspaceDir = defaultWorkspaceForCwd()): LiteSettings {
+  return {
+    schemaVersion: 1,
+    workspaceDir,
+    host: '127.0.0.1',
+    port: 3210,
+    connectorKey: randomBytes(24).toString('hex'),
+    actionsToken: randomBytes(32).toString('hex'),
+    publicBaseUrl: '',
+    maxOutputChars: 120_000,
+    commandTimeoutSec: 60,
+  };
+}
+
+export function validateSettings(settings: LiteSettings): string[] {
+  const errors: string[] = [];
+  if (typeof settings.workspaceDir !== 'string' || !isDirectory(settings.workspaceDir)) errors.push(`Workspace is not a directory: ${settings.workspaceDir || '(empty)'}`);
+  if (typeof settings.host !== 'string' || !settings.host.trim()) errors.push('Host cannot be empty.');
+  if (!Number.isInteger(settings.port) || settings.port < 0 || settings.port > 65535) errors.push('Port must be an integer from 0 to 65535.');
+  if (typeof settings.publicBaseUrl !== 'string' || !isValidPublicBaseUrl(settings.publicBaseUrl)) errors.push('Public URL must use HTTPS (localhost may use HTTP).');
+  if (typeof settings.connectorKey !== 'string' || typeof settings.actionsToken !== 'string' || settings.connectorKey.length < 24 || settings.actionsToken.length < 24) errors.push('Connector and Actions credentials must contain at least 24 characters.');
+  if (!Number.isInteger(settings.maxOutputChars) || settings.maxOutputChars < 4_000 || settings.maxOutputChars > 1_000_000) errors.push('Maximum output must be from 4000 to 1000000 characters.');
+  if (!Number.isInteger(settings.commandTimeoutSec) || settings.commandTimeoutSec < 1 || settings.commandTimeoutSec > 3600) errors.push('Command timeout must be from 1 to 3600 seconds.');
+  return errors;
+}
+
+export function readLiteSettings(env: NodeJS.ProcessEnv = process.env): LiteSettings | undefined {
+  const configPath = settingsPath(env);
+  if (!existsSync(configPath)) return undefined;
+  const parsed = JSON.parse(readFileSync(configPath, 'utf8')) as Partial<LiteSettings>;
+  if (parsed.schemaVersion !== 1) throw new Error(`Unsupported Lite settings format: ${configPath}`);
+  const settings = parsed as LiteSettings;
+  const errors = validateSettings(settings);
+  if (errors.length) throw new Error(`Invalid Lite settings: ${errors.join(' ')}`);
+  return settings;
+}
+
+export function saveLiteSettings(settings: LiteSettings, env: NodeJS.ProcessEnv = process.env): void {
+  const normalized: LiteSettings = {
+    ...settings,
+    workspaceDir: realpathSync(path.resolve(settings.workspaceDir)),
+    host: settings.host.trim(),
+    publicBaseUrl: settings.publicBaseUrl.trim().replace(/\/$/, ''),
+  };
+  const errors = validateSettings(normalized);
+  if (errors.length) throw new Error(errors.join(' '));
+  const configPath = settingsPath(env);
+  mkdirSync(path.dirname(configPath), { recursive: true, mode: 0o700 });
+  writeFileSync(configPath, `${JSON.stringify(normalized, null, 2)}\n`, { mode: 0o600 });
+  chmodSync(configPath, 0o600);
+}
+
+export function rotateLiteCredentials(settings: LiteSettings): LiteSettings {
+  return {
+    ...settings,
+    connectorKey: randomBytes(24).toString('hex'),
+    actionsToken: randomBytes(32).toString('hex'),
+  };
+}
+
+function envWorkspace(env: NodeJS.ProcessEnv): string | undefined {
+  return optionalEnv(env.LITE_WORKSPACE_DIR, WORKSPACE_PLACEHOLDERS);
+}
+
+export function settingsWithEnvironment(settings: LiteSettings, env: NodeJS.ProcessEnv = process.env): LiteSettings {
+  return {
+    ...settings,
+    workspaceDir: path.resolve(envWorkspace(env) || settings.workspaceDir),
+    host: optionalEnv(env.LITE_HOST) || settings.host,
+    port: boundedInteger(env.LITE_PORT, settings.port, 0, 65535),
+    publicBaseUrl: optionalEnv(env.LITE_PUBLIC_BASE_URL, PUBLIC_URL_PLACEHOLDERS) ?? settings.publicBaseUrl,
+    actionsToken: optionalEnv(env.LITE_ACTIONS_TOKEN) || settings.actionsToken,
+    connectorKey: optionalEnv(env.LITE_CONNECTOR_KEY) || settings.connectorKey,
+    maxOutputChars: boundedInteger(env.LITE_MAX_OUTPUT_CHARS, settings.maxOutputChars, 4_000, 1_000_000),
+    commandTimeoutSec: boundedInteger(env.LITE_COMMAND_TIMEOUT_SEC, settings.commandTimeoutSec, 1, 3600),
+  };
 }
 
 export function loadLiteConfig(env: NodeJS.ProcessEnv = process.env): LiteConfig {
-  const requestedWorkspace = path.resolve(env.LITE_WORKSPACE_DIR || process.cwd());
-  if (!existsSync(requestedWorkspace) || !statSync(requestedWorkspace).isDirectory()) {
-    throw new Error(`LITE_WORKSPACE_DIR is not a directory: ${requestedWorkspace}`);
-  }
-  const workspaceDir = realpathSync(requestedWorkspace);
+  const stored = readLiteSettings(env);
+  const base = stored || createDefaultSettings(path.resolve(envWorkspace(env) || defaultWorkspaceForCwd()));
+  const settings = settingsWithEnvironment(base, env);
+  const errors = validateSettings(settings);
+  if (errors.length) throw new Error(errors.join(' '));
+  const workspaceDir = realpathSync(settings.workspaceDir);
   const stateDir = path.join(workspaceDir, '.localterminal-lite');
   mkdirSync(stateDir, { recursive: true, mode: 0o700 });
-  const configPath = path.join(stateDir, 'config.json');
-  const stored = readConfigFile(configPath);
-  const connectorKey = env.LITE_CONNECTOR_KEY || stored?.connectorKey || randomBytes(24).toString('hex');
-  const actionsToken = env.LITE_ACTIONS_TOKEN || stored?.actionsToken || randomBytes(32).toString('hex');
-  if (connectorKey.length < 24 || actionsToken.length < 24) {
-    throw new Error('Lite connector and Actions credentials must contain at least 24 characters.');
-  }
-  const publicBaseUrl = (env.LITE_PUBLIC_BASE_URL || stored?.publicBaseUrl || `http://127.0.0.1:${env.LITE_PORT || 3210}`).replace(/\/$/, '');
-  const file: LiteConfigFile = { schemaVersion: 1, connectorKey, actionsToken, publicBaseUrl };
-  writeFileSync(configPath, `${JSON.stringify(file, null, 2)}\n`, { mode: 0o600 });
-  chmodSync(configPath, 0o600);
+  const publicBaseUrl = settings.publicBaseUrl || `http://${settings.host}:${settings.port}`;
   return {
+    settingsPath: settingsPath(env),
     workspaceDir,
     stateDir,
-    host: env.LITE_HOST || '127.0.0.1',
-    port: boundedInteger(env.LITE_PORT, 3210, 0, 65535),
-    connectorKey,
-    actionsToken,
-    publicBaseUrl,
-    maxOutputChars: boundedInteger(env.LITE_MAX_OUTPUT_CHARS, 120_000, 4_000, 1_000_000),
-    commandTimeoutSec: boundedInteger(env.LITE_COMMAND_TIMEOUT_SEC, 60, 1, 3600),
+    host: settings.host,
+    port: settings.port,
+    connectorKey: settings.connectorKey,
+    actionsToken: settings.actionsToken,
+    publicBaseUrl: publicBaseUrl.replace(/\/$/, ''),
+    maxOutputChars: settings.maxOutputChars,
+    commandTimeoutSec: settings.commandTimeoutSec,
   };
 }
 
