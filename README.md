@@ -1,6 +1,6 @@
 # LocalTerminal Lite
 
-LocalTerminal Lite 0.4 is a single-workspace development bridge with auditable, inheritable work sessions. It provides ChatGPT Apps (MCP), ChatGPT Actions (OpenAPI 3.1), a declarative extension registry, durable multi-session messages, and a full-window bilingual TUI.
+LocalTerminal Lite 0.4.1 is a single-workspace development bridge with auditable, inheritable work sessions. It provides ChatGPT Apps (MCP), ChatGPT Actions (OpenAPI 3.1), a declarative extension registry, durable multi-session messages, and a full-window bilingual TUI.
 
 The model-visible surface always contains exactly three facade tools:
 
@@ -36,7 +36,7 @@ The TUI is the owner control plane:
 - Sessions shows one structured tree card per logical session. Continuation records stay inside the card, delegated children are indented like directories under their parent, and colored phase/presence badges remain visible. Enter opens the complete permanent history.
 - Messages groups records by participant pair. Enter opens the complete two-way conversation.
 - Diff continuously tracks staged, unstaged, and untracked workspace changes with Git-style file, hunk, and `+`/`-` lines.
-- Up/Down, the mouse wheel, or `j`/`k` scrolls long content; PageUp/PageDown moves by a screen. The wheel also moves focus through Sessions, Messages, and Extensions.
+- Up/Down, the mouse wheel, or `j`/`k` scrolls long content; PageUp/PageDown moves by a screen. Wheel input is animated across short row steps, while clicks, releases, and drag motion are consumed without invoking keyboard shortcuts.
 - `n` prepares a root session or creates a structured direct child under a selected root.
 - `u` opens actions for the focused session. Passive prompt copying never revokes a controller; revoke is always explicit.
 - `m` sends an owner-mediated session message.
