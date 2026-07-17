@@ -1,6 +1,6 @@
 # LocalTerminal Lite
 
-LocalTerminal Lite 0.4.2 is a single-workspace development bridge with auditable, inheritable work sessions. It provides ChatGPT Apps (MCP), ChatGPT Actions (OpenAPI 3.1), a declarative extension registry, durable multi-session messages, and a full-window bilingual TUI.
+LocalTerminal Lite 0.5.0 is a single-workspace development bridge with auditable, inheritable work sessions. It provides ChatGPT Apps (MCP), ChatGPT Actions (OpenAPI 3.1), a declarative extension registry, durable multi-session messages, and a full-window bilingual OpenTUI React interface.
 
 The model-visible surface always contains exactly three facade tools:
 
@@ -14,17 +14,17 @@ Concrete workspace, Git, session, message, and custom tools remain behind that f
 
 ```bash
 cd lite
-npm install
-npm run dev
+bun install
+bun run dev
 ```
 
-No `.env` file is required. On first launch, the TUI configures language, theme, workspace, bind address, public URL, execution limits, Apps connector key, and Actions token. Press `c` later to change these settings safely.
+Bun 1.3 or newer is required. No `.env` file is required. On first launch, an OpenTUI form configures language, theme, workspace, bind address, public URL, execution limits, Apps connector key, and Actions token. Press `c` later to change these settings safely.
 
 For a previously configured non-interactive service:
 
 ```bash
-npm run build
-npm run start -- --headless
+bun run build
+bun run start -- --headless
 ```
 
 ## TUI
@@ -35,7 +35,7 @@ The TUI is the owner control plane:
 - Sessions shows one structured tree card per logical session. Continuation records stay inside the card, delegated children are indented like directories under their parent, and colored phase/presence badges remain visible. Enter opens the complete permanent history.
 - Messages groups records by participant pair. Enter opens the complete two-way conversation.
 - Diff continuously tracks staged, unstaged, and untracked workspace changes with Git-style file, hunk, and `+`/`-` lines.
-- Up/Down or the mouse wheel scrolls long content immediately; PageUp/PageDown moves by a screen. Sessions, Messages, and Extensions use `j`/`k` for focused-item selection. Lite uses standard alternate-scroll mode instead of mouse reporting, so normal click-and-drag text selection remains owned by the terminal on macOS and Windows.
+- OpenTUI ScrollBox owns mouse-wheel, arrow-key, PageUp/PageDown, scrollbar, viewport culling, and content-size changes. Sessions, Messages, and Extensions use `j`/`k` for focused-item selection without taking wheel control away from the viewport.
 - `n` prepares a root session or creates a structured direct child under a selected root.
 - `u` opens actions for the focused session. Passive prompt copying never revokes a controller; revoke is always explicit.
 - `m` sends an owner-mediated session message.
@@ -44,9 +44,11 @@ The TUI is the owner control plane:
 - `a` on Logs toggles sanitized factual tool calls from every session.
 - `q` stops Lite.
 
-The main screen uses the terminal alternate buffer, disables normal scrollback, and always renders exactly one terminal window. Each changed frame erases the remainder of every row and the unused screen area; unchanged frames produce no terminal output, preventing stale text and avoiding unnecessary selection disruption. ANSI-aware display-width wrapping preserves colors and wraps Chinese, paths, logs, diffs, summaries, and prompts to the current terminal width instead of discarding their tails. Key hints are contextual, responsive, and highlighted at the bottom instead of listing every application command at once.
+OpenTUI owns the alternate screen, terminal capability negotiation, mouse decoding, incremental rendering, teardown, layout, wrapping, focus, and scrolling. Lite does not attach raw stdin listeners, parse SGR mouse sequences, emit DECSET 1007, or write ANSI frames. Every long page is a real ScrollBox while the header, tabs, prompt modal, and contextual footer remain fixed. Mouse drag selection is handled by the renderer and copied through OSC 52 plus the host clipboard on macOS and Windows.
 
-Pending delegated sessions appear in a persistent red banner. Lite copies a handoff prompt to the clipboard, rings the terminal every 60 seconds, and sends an OS notification every five minutes until the session is claimed or cancelled. macOS uses native `pbcopy` and notifications; Windows/Linux use best-effort native commands and fall back to visible TUI text.
+All shortcuts enter through one OpenTUI keymap with fixed priority: modal → focused form control → current page → global commands. Forms remain inside the full-window TUI and use OpenTUI Input/Textarea controls; the application never temporarily switches into readline mode.
+
+Pending delegated sessions appear in a persistent red banner. Lite copies a handoff prompt to the clipboard, plays a best-effort native alert every 60 seconds, and sends an OS notification every five minutes until the session is claimed or cancelled. macOS uses native clipboard/audio/notifications; Windows/Linux use best-effort native commands and always retain the visible TUI banner.
 
 Only the TUI can permanently delete sessions. Before confirmation it displays the session name, state, objective, checkpoint/final summaries, children, message count, and permanent-history count. Deleting then requires the exact phrase shown by the TUI and cascades only through child sessions. Same-level continuation sessions remain and display a deleted-predecessor marker.
 
@@ -143,8 +145,8 @@ The Actions document is OpenAPI `3.1.0`, exposes exactly three operations, and u
 ## Verify
 
 ```bash
-npm run typecheck
-npm test
+bun run typecheck
+bun run test
 ```
 
 The suite covers Actions and Apps identity, controller takeover, fixed checkpoint timing, parent/child completion, event delivery and ACK, subscriptions, durable history, redaction, v1 migration, deletion, and continuation.

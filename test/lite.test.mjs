@@ -4,11 +4,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { act, createElement } from 'react';
+import { testRender } from '@opentui/react/test-utils';
 import { LiteRuntime } from '../dist/server.js';
 import { LiteStore, SESSION_TIMING } from '../dist/store.js';
 import { WorkspaceDiffTracker } from '../dist/diff.js';
 import { conversationGroups, logicalSessionGroups, selectedViewport } from '../dist/tui-model.js';
-import { terminalFrame, wrapTerminalLine, wrapTerminalLines } from '../dist/tui-layout.js';
+import { phaseColor, presenceColor, themeFor } from '../dist/tui/state.js';
 import { createDefaultSettings, loadLiteConfig, readLiteSettings, saveLiteSettings, settingsPath } from '../dist/config.js';
 
 const CONNECTOR_KEY = 'test-connector-key-1234567890';
@@ -42,13 +44,33 @@ async function root(server, name = 'main', continuesSessionId) {
 }
 const task = { objective: 'Implement the assigned slice.', background: 'The root session delegated bounded work.', deliverables: ['Code and summary'], acceptanceCriteria: ['Checks pass'], constraints: ['Stay within scope'] };
 
-test('TUI wraps ANSI and CJK content without discarding display cells', () => {
-  assert.deepEqual(wrapTerminalLine('中文abcdef', 6), ['中文ab', 'cdef']);
-  const colored = wrapTerminalLines(['\u001b[31m一段很长的状态说明abcdef\u001b[0m'], 8);
-  assert.ok(colored.length > 1); assert.ok(colored.every((line) => line.includes('\u001b[')));
-  const frame = terminalFrame(['long stale content', 'short'], 20);
-  assert.equal((frame.output.match(/\u001b\[K/g) || []).length, 2);
-  assert.ok(frame.output.startsWith('\u001b[H')); assert.ok(frame.output.endsWith('\u001b[J'));
+test('OpenTUI theme and structured session status colors stay deterministic', () => {
+  const theme = themeFor('dark');
+  assert.equal(phaseColor(theme, 'completed'), theme.good);
+  assert.equal(phaseColor(theme, 'blocked'), theme.bad);
+  assert.equal(presenceColor(theme, { presence: 'claimed' }), theme.good);
+  assert.equal(presenceColor(theme, { presence: 'stale' }), theme.bad);
+});
+
+test('OpenTUI ScrollBox owns wheel scrolling and renderer selection without click leakage', async () => {
+  let mouseUps = 0;
+  const lines = Array.from({ length: 30 }, (_, index) => createElement('text', { key: index, wrapMode: 'word' }, `row ${String(index).padStart(2, '0')} selectable content`));
+  const ui = createElement('box', { width: 36, height: 8, onMouseUp: () => { mouseUps += 1; } },
+    createElement('scrollbox', { width: 36, height: 8, focused: true, viewportCulling: true },
+      createElement('box', { width: '100%', flexDirection: 'column' }, ...lines)));
+  let setup;
+  await act(async () => { setup = await testRender(ui, { width: 36, height: 8, useMouse: true, autoFocus: true }); await setup.flush(); });
+  try {
+    const before = setup.captureCharFrame();
+    await act(async () => { await setup.mockMouse.scroll(8, 4, 'down'); await setup.flush(); });
+    assert.notEqual(setup.captureCharFrame(), before);
+    await act(async () => { await setup.mockMouse.drag(2, 2, 16, 2); await setup.flush(); });
+    assert.equal(mouseUps, 1);
+    assert.equal(setup.renderer.hasSelection, true);
+    assert.ok(setup.renderer.getSelection()?.getSelectedText());
+  } finally {
+    await act(async () => { setup.renderer.destroy(); });
+  }
 });
 
 function parseEventStreamJson(text) {
@@ -238,7 +260,7 @@ test('Apps exposes only three tools and binds openai/session only after explicit
   const server = await createRuntime();
   try {
     const url = `${server.baseUrl}/mcp/${CONNECTOR_KEY}`;
-    const init = await rpcPost(url, { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'lite-test', version: '0.4.2' } } });
+    const init = await rpcPost(url, { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'lite-test', version: '0.5.0' } } });
     assert.match(init.data.result.instructions, /Do not use session_inherit to continue completed work/); assert.match(init.data.result.instructions, /message_conversation/);
     const listed = await rpcPost(url, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }, init.sessionId);
     assert.deepEqual(listed.data.result.tools.map((tool) => tool.name).sort(), ['extension_call', 'extension_discover', 'extension_register']);

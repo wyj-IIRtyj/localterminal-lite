@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 import {
   createDefaultSettings,
   loadLiteConfig,
@@ -8,16 +8,16 @@ import {
   settingsPath,
 } from './config.js';
 import { LiteRuntime } from './server.js';
-import { LiteTui, runSetupTui, type RuntimeReconfigure } from './tui.js';
+import type { RuntimeReconfigure } from './tui/state.js';
 import type { LiteSettings } from './types.js';
 
 function help(): void {
-  console.log(`LocalTerminal Lite v0.4.2
+  console.log(`LocalTerminal Lite v0.5.0
 
 Usage:
-  npm run dev                 Start the TUI (includes first-run setup)
-  npm run start               Start the built TUI
-  node dist/cli.js --headless Start after TUI setup, without terminal controls
+  bun run dev                 Start the TUI (includes first-run setup)
+  bun run start               Start the built TUI
+  bun run dist/cli.js --headless Start after TUI setup, without terminal controls
 
 The TUI manages workspace, network, limits, and connection credentials.
 Optional environment overrides for automation:
@@ -47,9 +47,10 @@ async function ensureSettings(headless: boolean, env: NodeJS.ProcessEnv): Promis
     if (headless) throw error;
   }
   if (headless) {
-    throw new Error('Lite has not been configured. Run `npm run dev` once and complete the TUI setup.');
+    throw new Error('Lite has not been configured. Run `bun run dev` once and complete the TUI setup.');
   }
   const defaults = createDefaultSettings();
+  const { runSetupTui } = await import('./tui/index.js');
   const configured = await runSetupTui(defaults);
   saveLiteSettings(configured, env);
 }
@@ -70,6 +71,7 @@ async function main(): Promise<void> {
   await ensureSettings(headless, env);
   let runtime = await startRuntime(env);
   if (!headless) {
+    const { LiteTui } = await import('./tui/index.js');
     const reconfigure: RuntimeReconfigure = async (next: LiteSettings) => {
       const previous = readLiteSettings(env);
       if (!previous) return { runtime, error: 'Persistent settings were not found.' };
@@ -104,6 +106,7 @@ async function main(): Promise<void> {
 }
 
 main().catch((error) => {
+  if (error instanceof Error && error.message === 'Setup cancelled.') return;
   console.error(error instanceof Error ? error.stack || error.message : String(error));
   process.exit(1);
 });
