@@ -13,7 +13,8 @@ Concrete workspace, Git, session, message, and custom tools remain behind that f
 ## Install and run
 
 ```bash
-cd lite
+git clone https://github.com/wyj-IIRtyj/localterminal-lite.git
+cd localterminal-lite
 npm install
 npm run dev
 ```
