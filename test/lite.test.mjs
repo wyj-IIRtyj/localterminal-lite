@@ -94,12 +94,23 @@ async function rpcPost(url, payload, sessionId) {
   };
 }
 
-test('Actions OpenAPI exposes exactly the three extension facade operations', async () => {
+test('Actions OpenAPI 3.1 document exposes three operations and concrete component schemas', async () => {
   const server = await createRuntime();
   try {
     const response = await fetch(`${server.baseUrl}/openapi.json`);
     assert.equal(response.status, 200);
     const schema = await response.json();
+    assert.equal(schema.openapi, '3.1.0');
+    assert.equal(typeof schema.components, 'object');
+    assert.equal(Array.isArray(schema.components.schemas), false);
+    assert.equal(typeof schema.components.schemas, 'object');
+    assert.deepEqual(Object.keys(schema.components.schemas).sort(), [
+      'Error',
+      'ExtensionCallRequest',
+      'ExtensionDiscoverRequest',
+      'ExtensionRegisterRequest',
+      'ToolResponse',
+    ]);
     assert.deepEqual(Object.keys(schema.paths).sort(), [
       '/actions/extensions/call',
       '/actions/extensions/discover',
@@ -107,6 +118,14 @@ test('Actions OpenAPI exposes exactly the three extension facade operations', as
     ]);
     assert.deepEqual(Object.values(schema.paths).map((item) => item.post.operationId).sort(), ['extensionCall', 'extensionDiscover', 'extensionRegister']);
     assert.equal(schema.servers[0].url, server.baseUrl);
+    for (const pathItem of Object.values(schema.paths)) {
+      const requestRef = pathItem.post.requestBody.content['application/json'].schema.$ref;
+      const responseRef = pathItem.post.responses['200'].content['application/json'].schema.$ref;
+      assert.ok(schema.components.schemas[requestRef.split('/').at(-1)]);
+      assert.ok(schema.components.schemas[responseRef.split('/').at(-1)]);
+    }
+    const aliasResponse = await fetch(`${server.baseUrl}/openapi-3.1.json`);
+    assert.deepEqual(await aliasResponse.json(), schema);
   } finally {
     await server.close();
   }

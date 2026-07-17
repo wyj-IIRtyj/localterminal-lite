@@ -65,7 +65,7 @@ https://your-public-domain.example/openapi.json
 
 Configure Bearer authentication with the Actions token shown in the TUI's Settings view (`v` toggles visibility).
 
-The default document is OpenAPI 3.0.3 for broad GPT Actions compatibility and exposes exactly three operations: `extensionDiscover`, `extensionRegister`, and `extensionCall`. An equivalent OpenAPI 3.1 document is available at `/openapi-3.1.json`.
+The default document is OpenAPI 3.1.0, as required by the current ChatGPT Actions importer, and exposes exactly three operations: `extensionDiscover`, `extensionRegister`, and `extensionCall`. Its `components.schemas` section is always a concrete object containing the request and response schemas. `/openapi-3.1.json` remains as an equivalent compatibility alias.
 
 ## Extension workflow
 
