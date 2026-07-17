@@ -1,0 +1,39 @@
+{
+  "name": "localterminal-mcp-lite",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Lite local WebDev MCP with dual-session collaboration, Apps and Actions adapters, extension tools, and a terminal UI.",
+  "type": "module",
+  "license": "UNLICENSED",
+  "main": "dist/cli.js",
+  "files": [
+    "dist",
+    "README.md",
+    ".env.example"
+  ],
+  "bin": {
+    "localterminal-lite": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/cli.ts",
+    "start": "node dist/cli.js",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.1.0",
+    "tsx": "^4.23.0",
+    "typescript": "^6.0.3"
+  }
+}
