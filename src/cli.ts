@@ -12,7 +12,7 @@ import { LiteTui, runSetupTui, type RuntimeReconfigure } from './tui.js';
 import type { LiteSettings } from './types.js';
 
 function help(): void {
-  console.log(`LocalTerminal Lite v0.1.0
+  console.log(`LocalTerminal Lite v0.2.0
 
 Usage:
   npm run dev                 Start the TUI (includes first-run setup)

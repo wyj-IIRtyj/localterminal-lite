@@ -12,16 +12,36 @@ type LiveSession = { server: McpServer; transport: StreamableHTTPServerTransport
 const responseSchema = {
   ok: z.boolean(),
   data: z.record(z.string(), z.unknown()).optional(),
-  error: z.object({ code: z.string(), message: z.string(), retryable: z.boolean() }).optional(),
+  events: z.array(z.record(z.string(), z.unknown())).optional(),
+  error: z.object({ code: z.string(), message: z.string(), retryable: z.boolean(), details: z.record(z.string(), z.unknown()).optional() }).optional(),
 };
+
+const identitySchema = z.object({ sessionId: z.string().min(1), sessionToken: z.string().min(1) });
 
 const extensionToolInput = z.object({
   name: z.string().optional(),
   role: z.string().optional(),
   session: z.string().optional(),
-  status: z.enum(['active', 'idle', 'blocked', 'completed']).optional(),
+  mode: z.enum(['root', 'delegate']).optional(),
+  phase: z.enum(['pending', 'working', 'waiting', 'blocked', 'completed', 'cancelled']).optional(),
   note: z.string().optional(),
-  from: z.string().optional(),
+  sessionId: z.string().optional(),
+  claimCode: z.string().optional(),
+  continuesSessionId: z.string().optional(),
+  summary: z.string().optional(),
+  objective: z.string().optional(),
+  background: z.string().optional(),
+  deliverables: z.array(z.string()).optional(),
+  acceptanceCriteria: z.array(z.string()).optional(),
+  constraints: z.array(z.string()).optional(),
+  task: z.record(z.string(), z.unknown()).optional(),
+  nextSteps: z.array(z.string()).optional(),
+  blockers: z.array(z.string()).optional(),
+  artifacts: z.array(z.string()).optional(),
+  milestone: z.string().optional(),
+  tags: z.array(z.string()).optional(),
+  targetSessionId: z.string().optional(),
+  eventIds: z.array(z.string()).optional(),
   to: z.string().optional(),
   body: z.string().optional(),
   markRead: z.boolean().optional(),
@@ -76,33 +96,33 @@ function contextFromCall(callContext: unknown): InvocationContext {
 }
 
 export function createMcpServer(service: ExtensionService): McpServer {
-  const server = new McpServer({ name: 'localterminal-lite', version: '0.1.0' });
+  const server = new McpServer({ name: 'localterminal-lite', version: '0.2.0' });
   server.registerTool('extension_discover', {
     title: 'Discover extension tools',
     description: 'Use first to learn all concrete tools available behind LocalTerminal Lite, how to call them, and how to validate/register custom tools.',
-    inputSchema: { query: z.string().min(1).max(200).optional(), includeSchemas: z.boolean().optional(), sessionId: z.string().max(120).optional() },
+    inputSchema: { query: z.string().min(1).max(200).optional(), includeSchemas: z.boolean().optional(), identity: identitySchema.optional() },
     outputSchema: responseSchema,
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     _meta: { 'openai/toolInvocation/invoking': 'Inspecting extensions…', 'openai/toolInvocation/invoked': 'Extension catalog ready' },
-  }, async (input, callContext) => toToolResult(await service.discover(input as JsonObject), 'Extension catalog and usage instructions are ready.'));
+  }, async (input, callContext) => toToolResult(await service.discover(input as JsonObject, contextFromCall(callContext)), 'Extension catalog and usage instructions are ready.'));
 
   server.registerTool('extension_register', {
     title: 'Register or edit extension tool',
     description: 'Validate, upsert, or remove one declarative extension. Validate before upsert. Use extension_discover for the exact registration format.',
-    inputSchema: { action: z.enum(['validate', 'upsert', 'remove']), name: z.string().optional(), spec: extensionSpec.optional(), specJson: z.string().optional(), sessionId: z.string().max(120).optional() },
+    inputSchema: { action: z.enum(['validate', 'upsert', 'remove']), name: z.string().optional(), spec: extensionSpec.optional(), specJson: z.string().optional(), identity: identitySchema.optional() },
     outputSchema: responseSchema,
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false, idempotentHint: true },
     _meta: { 'openai/toolInvocation/invoking': 'Validating extension…', 'openai/toolInvocation/invoked': 'Extension registry updated' },
-  }, async (input, callContext) => toToolResult(await service.register(input as JsonObject), 'Extension registration operation completed.'));
+  }, async (input, callContext) => toToolResult(await service.register(input as JsonObject, contextFromCall(callContext)), 'Extension registration operation completed.'));
 
   server.registerTool('extension_call', {
     title: 'Call concrete extension tool',
     description: 'Invoke one builtin or custom extension by exact name. Put tool arguments in input (preferred) or arguments (legacy). Call extension_discover first for its schema.',
-    inputSchema: { tool: z.string().min(3).max(64), input: extensionToolInput.optional(), arguments: extensionToolInput.optional(), inputJson: z.string().optional(), sessionId: z.string().max(120).optional() },
+    inputSchema: { tool: z.string().min(3).max(64), input: extensionToolInput.optional(), arguments: extensionToolInput.optional(), inputJson: z.string().optional(), identity: identitySchema.optional() },
     outputSchema: responseSchema,
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true, idempotentHint: false },
     _meta: { 'openai/toolInvocation/invoking': 'Running extension…', 'openai/toolInvocation/invoked': 'Extension call complete' },
-  }, async (input, callContext) => toToolResult(await service.call(input as JsonObject, { ...contextFromCall(callContext), sessionId: input.sessionId }), 'Extension call completed.'));
+  }, async (input, callContext) => toToolResult(await service.call(input as JsonObject, contextFromCall(callContext)), 'Extension call completed.'));
   return server;
 }
 

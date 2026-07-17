@@ -1,14 +1,54 @@
 export type JsonObject = Record<string, unknown>;
 
-export type SessionStatus = 'active' | 'idle' | 'blocked' | 'completed';
+export type SessionPhase = 'pending' | 'working' | 'waiting' | 'blocked' | 'completed' | 'cancelled';
+export type SessionPresence = 'unclaimed' | 'claimed' | 'stale';
+
+export type SessionIdentity = { sessionId: string; sessionToken: string };
+
+export type TaskPackage = {
+  objective: string;
+  background: string;
+  deliverables: string[];
+  acceptanceCriteria: string[];
+  constraints: string[];
+};
+
+export type SessionCheckpoint = {
+  at: string;
+  phase: SessionPhase;
+  summary: string;
+  nextSteps?: string[];
+  blockers?: string[];
+  artifacts?: string[];
+  milestone?: string;
+  tags?: string[];
+};
+
+export type SessionController = {
+  id: string;
+  tokenHash: string;
+  claimedAt: string;
+  lastActivityAt: string;
+};
 
 export type LiteSession = {
   id: string;
   name: string;
   role: string;
-  status: SessionStatus;
-  clientSessionKey?: string;
-  note?: string;
+  phase: SessionPhase;
+  presence: SessionPresence;
+  parentSessionId?: string;
+  continuesSessionId?: string;
+  predecessorDeleted?: boolean;
+  task?: TaskPackage;
+  controller?: SessionController;
+  claimCodeHash?: string;
+  claimCodeIssuedAt?: string;
+  checkpointStartedAt?: string;
+  checkpointReminderEmittedAt?: string;
+  latestCheckpoint?: SessionCheckpoint;
+  finalSummary?: string;
+  tags: string[];
   createdAt: string;
   updatedAt: string;
 };
@@ -20,6 +60,33 @@ export type LiteMessage = {
   body: string;
   createdAt: string;
   readAt?: string;
+};
+
+export type SessionEventKind =
+  | 'message' | 'child_created' | 'milestone' | 'phase_changed' | 'blocked'
+  | 'completed' | 'stale' | 'checkpoint_due' | 'claimed' | 'revoked' | 'released' | 'cancelled';
+
+export type SessionEvent = {
+  id: string;
+  recipientSessionId: string;
+  sourceSessionId: string;
+  kind: SessionEventKind;
+  payload: JsonObject;
+  createdAt: string;
+  acknowledgedAt?: string;
+};
+
+export type SessionSubscription = {
+  subscriberSessionId: string;
+  targetSessionId: string;
+  createdAt: string;
+};
+
+export type AppSessionBinding = {
+  clientSessionKey: string;
+  sessionId: string;
+  controllerId: string;
+  boundAt: string;
 };
 
 export type JsonSchema = {
@@ -46,19 +113,8 @@ export type ExtensionAnnotations = {
   idempotentHint?: boolean;
 };
 
-export type BuiltinExtensionHandler = {
-  kind: 'builtin';
-  target: string;
-  defaults?: JsonObject;
-};
-
-export type CommandExtensionHandler = {
-  kind: 'command';
-  executable: string;
-  args?: string[];
-  cwd?: string;
-  timeoutSec?: number;
-};
+export type BuiltinExtensionHandler = { kind: 'builtin'; target: string; defaults?: JsonObject };
+export type CommandExtensionHandler = { kind: 'command'; executable: string; args?: string[]; cwd?: string; timeoutSec?: number };
 
 export type CustomExtensionSpec = {
   name: string;
@@ -70,10 +126,13 @@ export type CustomExtensionSpec = {
 };
 
 export type StoredState = {
-  schemaVersion: 1;
+  schemaVersion: 2;
   revision: number;
   sessions: LiteSession[];
   messages: LiteMessage[];
+  events: SessionEvent[];
+  subscriptions: SessionSubscription[];
+  appBindings: AppSessionBinding[];
   extensions: CustomExtensionSpec[];
 };
 
@@ -103,7 +162,8 @@ export type LiteConfig = {
 };
 
 export type InvocationContext = {
-  sessionId?: string;
+  identity?: SessionIdentity;
+  authenticatedSession?: LiteSession;
   clientSessionKey?: string;
   transport: 'apps' | 'actions' | 'tui' | 'test';
 };
@@ -111,11 +171,8 @@ export type InvocationContext = {
 export type ToolResponse = {
   ok: boolean;
   data?: JsonObject;
-  error?: {
-    code: string;
-    message: string;
-    retryable: boolean;
-  };
+  events?: SessionEvent[];
+  error?: { code: string; message: string; retryable: boolean; details?: JsonObject };
 };
 
 export type ToolDefinition = {

@@ -1,15 +1,14 @@
 # LocalTerminal Lite
 
-LocalTerminal Lite is a single-workspace local WebDev server with:
+LocalTerminal Lite 0.2 is a single-workspace development bridge with auditable, inheritable work sessions. It provides ChatGPT Apps (MCP), ChatGPT Actions (OpenAPI 3.1), a declarative extension registry, durable multi-session messages, and a full-screen TUI.
 
-- persistent multi-session registration and messaging;
-- ChatGPT Apps access over MCP Streamable HTTP;
-- ChatGPT Actions access through a generated OpenAPI 3.1 document;
-- exactly three model-visible facade tools;
-- a declarative extension registry;
-- an interactive full-screen terminal UI.
+The model-visible surface always contains exactly three facade tools:
 
-It intentionally does not include the Full edition's browser automation, desktop control, multimodal observation, React Dashboard, GitHub control plane, Harness/Episode framework, or Actions parity program.
+- `extension_discover`
+- `extension_register`
+- `extension_call`
+
+Concrete workspace, Git, session, message, and custom tools remain behind that facade.
 
 ## Install and run
 
@@ -19,94 +18,120 @@ npm install
 npm run dev
 ```
 
-首次启动会打开全屏配置向导。工作区、监听地址、公网 URL、运行限制和接入凭据都由 TUI 管理并持久化；不需要创建或编辑 `.env`。高级无界面部署可以通过进程环境变量临时覆盖设置。
+No `.env` file is required. On first launch, the TUI configures the workspace, bind address, public URL, execution limits, Apps connector key, and Actions token. Press `c` later to change these settings safely.
 
-The TUI is the primary interface. It displays server endpoints and runtime state and supports:
-
-- `1`-`6` or Tab: switch views;
-- `n`: register a session;
-- `u`: update session status;
-- `m`: send a message between sessions;
-- `e`: register a custom builtin alias;
-- `x`: remove a custom extension;
-- `c`: configure workspace, network, and runtime limits, then restart safely;
-- `v`: reveal or mask Apps and Actions credentials;
-- `k`: rotate both connection credentials;
-- `q`: stop the server.
-
-For a service process without terminal controls:
+For a previously configured non-interactive service:
 
 ```bash
 npm run build
 npm run start -- --headless
 ```
 
-## Connect ChatGPT Apps
+## TUI
 
-The TUI prints the exact MCP URL:
+The TUI is the owner control plane:
 
-```text
-https://your-public-domain.example/mcp/<generated-connector-key>
+- `1`–`6`, Tab, or arrows switch views.
+- `n` prepares a root session or creates a structured direct child under a selected root.
+- `u` copies/reissues handoff prompts, revokes a controller, cancels pending work, inspects bounded context, or permanently deletes a session.
+- `m` sends an owner-mediated session message.
+- `e` / `x` add or remove declarative custom extensions.
+- `c` edits all runtime configuration; `v` reveals credentials; `k` rotates connection credentials.
+- `q` stops Lite.
+
+Pending delegated sessions appear in a persistent red banner. Lite copies a handoff prompt to the clipboard, rings the terminal every 60 seconds, and sends an OS notification every five minutes until the session is claimed or cancelled. macOS uses native `pbcopy` and notifications; Windows/Linux use best-effort native commands and fall back to visible TUI text.
+
+Only the TUI can permanently delete sessions. Deleting a session with history or descendants requires the exact phrase shown by the TUI and cascades only through child sessions. Same-level continuation sessions remain and display a deleted-predecessor marker.
+
+## Session identity
+
+A Lite session is a work context, not a ChatGPT conversation ID. Its identity is:
+
+```json
+{
+  "sessionId": "ses_...",
+  "sessionToken": "returned-only-when-claimed"
+}
 ```
 
-Expose the local server through an HTTPS tunnel, then create a developer-mode app in ChatGPT and paste that URL. The server advertises exactly:
+Tokens are returned only when a controller claims a session. Lite persists only their hashes and removes identity and claim fields from audit records.
 
-- `extension_discover`
-- `extension_register`
-- `extension_call`
+Unauthenticated callers can only:
 
-## Connect ChatGPT Actions
+1. create and claim a root with `session_register(mode=root)`; or
+2. claim delegated/released work with `session_inherit(sessionId, claimCode)`.
 
-Import the OpenAPI URL printed by the TUI:
+Unauthenticated `extension_discover` returns only these bootstrap instructions. Every other concrete tool call and every extension registry change requires identity.
 
-```text
-https://your-public-domain.example/openapi.json
+Actions must include `identity` on every authenticated facade request. Apps may omit it only after one explicit verified identity call binds the current `openai/session` hint. That hint is never allowed to create, inherit, or independently identify a Lite session.
+
+Root bootstrap example:
+
+```json
+{
+  "tool": "session_register",
+  "input": { "mode": "root", "name": "main", "role": "lead" }
+}
 ```
 
-Configure Bearer authentication with the Actions token shown in the TUI's Settings view (`v` toggles visibility).
-
-The default document is OpenAPI 3.1.0, as required by the current ChatGPT Actions importer, and exposes exactly three operations: `extensionDiscover`, `extensionRegister`, and `extensionCall`. Its `components.schemas` section is always a concrete object containing the request and response schemas. `/openapi-3.1.json` remains as an equivalent compatibility alias.
-
-Actions calls put concrete tool arguments inside `input` (preferred); `arguments` remains a compatibility alias and `inputJson` is available for custom fields that an importer cannot represent. For example:
+Authenticated call example:
 
 ```json
 {
   "tool": "message_send",
-  "sessionId": "ses_sender",
+  "identity": { "sessionId": "ses_sender", "sessionToken": "..." },
   "input": { "to": "ses_recipient", "body": "Please review this change." }
 }
 ```
 
-`extensionRegister` accepts a fully described `spec` object. `specJson` is a fallback for clients that can only send the complete spec as a JSON string. The OpenAPI document includes concrete examples for discovery, registration, session creation, message sending, and inbox reading.
+## Collaboration lifecycle
 
-## Extension workflow
+Session work phase and controller presence are independent:
 
-1. Call `extension_discover` to inspect available builtins, schemas, and registration instructions.
-2. Call `extension_register` with `action=validate` and a declarative spec.
-3. Call it again with `action=upsert` after validation.
-4. Invoke the custom tool through `extension_call`.
+- phase: `pending | working | waiting | blocked | completed | cancelled`
+- presence: `unclaimed | claimed | stale`
 
-Custom extensions support:
+A root can delegate multiple direct children. Children cannot delegate grandchildren. Delegation requires `objective`, `background`, `deliverables`, `acceptanceCriteria`, and `constraints`; the inheriting child also receives a bounded projection of parent summaries and recent audit activity.
 
-- a builtin alias with optional default arguments;
-- an executable with a list of argument templates such as `{{input.path}}`.
+After the first ordinary work call, a checkpoint window starts and later calls do not reset it:
 
-Commands use direct process spawning rather than implicit shell interpolation. A custom extension can explicitly select a shell executable, but it is then correctly marked as consequential.
+- 2 minutes: a `checkpoint_due` event is created.
+- 5 minutes: ordinary work is blocked until `session_checkpoint`.
+- 15 minutes without tool activity: the controller becomes stale and its token is invalidated.
 
-## Multi-session collaboration
+Before ending a work turn, call `session_checkpoint` with a 1–4000 character summary and the current phase. Optional fields include next steps, blockers, artifacts, milestone, and tags. Completing a session makes it immutable and releases its controller. A root cannot complete while direct children remain non-terminal; Lite returns `CHILD_REVIEW_REQUIRED` with child checkpoints, unread messages, and pending events.
 
-Concrete collaboration tools behind `extension_call` include:
+Continuing terminal work creates a same-level session with `continuesSessionId`; terminal sessions are never reopened.
 
-- `session_register`, `session_list`, `session_update`, `session_unregister`;
-- `message_send`, `message_inbox`, `message_list`.
+## Events, messages, and history
 
-Apps calls use ChatGPT's anonymized conversation-session hint for correlation when present. Actions callers can pass `sessionId` explicitly. Authorization never relies on a session hint.
+Every authenticated facade response includes up to five unacknowledged events for that session. Unacknowledged events repeat until `session_events_ack`; acknowledgement never deletes history. Events include messages, child creation, subscription progress, milestones, phase changes, blocked/completed/stale state, checkpoint reminders, claims, releases, and revocations.
 
-## Security boundary
+Message sender identity is always the authenticated session. Models can read only their own inbox. Roots automatically subscribe to direct children, and any session can subscribe to another session with `session_subscribe`.
 
-- Only one configured workspace is authorized.
-- Real paths and symlinks are checked before access.
-- `.localterminal-lite` cannot be read or edited through extension file tools.
-- command output, file reads, traversal, and execution time are bounded.
-- Actions require a Bearer token; Apps use an unguessable connector URL.
-- This is a single-user local development tool, not a multi-tenant hosted execution service.
+Persistence uses schema v2:
+
+- `.localterminal-lite/state.json` stores current materialized state, subscriptions, controller hashes, Apps bindings, events, and extensions.
+- `.localterminal-lite/history/<sessionId>.jsonl` permanently appends task packages, checkpoints, messages, state events, and sanitized tool audits.
+
+Audit argument snapshots are capped at 4000 characters. Identity, token, authorization, claim-code, body, and content fields are redacted. Context inheritance is a projection capped at 16000 characters, with up to 10 recent tool calls and 20 recent messages while prioritizing objectives, final summaries, and unread messages.
+
+Existing schema-v1 state migrates automatically: sessions become roots, old statuses map to phases, presence becomes stale, messages move into permanent history, and old ChatGPT client-session hints no longer grant identity.
+
+## Connect ChatGPT
+
+The Overview tab prints both endpoints:
+
+- Apps: `https://your-domain.example/mcp/<connector-key>`
+- Actions schema: `https://your-domain.example/openapi.json`
+
+The Actions document is OpenAPI `3.1.0`, exposes exactly three operations, and uses a concrete object at `components.schemas`. Configure its Bearer authentication with the token shown in the Settings tab.
+
+## Verify
+
+```bash
+npm run typecheck
+npm test
+```
+
+The suite covers Actions and Apps identity, controller takeover, fixed checkpoint timing, parent/child completion, event delivery and ACK, subscriptions, durable history, redaction, v1 migration, deletion, and continuation.

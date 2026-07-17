@@ -72,7 +72,7 @@ export class LiteRuntime {
   }
 
   private configureRoutes(): void {
-    this.app.get('/health', (_req, res) => res.json({ ok: true, product: 'localterminal-lite', version: '0.1.0', toolsExposed: 3, sessions: this.store.listSessions().length, activeMcpSessions: this.activeMcpSessions() }));
+    this.app.get('/health', (_req, res) => res.json({ ok: true, product: 'localterminal-lite', version: '0.2.0', toolsExposed: 3, sessions: this.store.listSessions().length, activeMcpSessions: this.activeMcpSessions() }));
     this.app.get('/openapi.json', (_req, res) => res.json(buildOpenApi({ ...this.config, publicBaseUrl: this.resolvedPublicBaseUrl() })));
     this.app.get('/openapi-3.1.json', (_req, res) => res.json(buildOpenApi({ ...this.config, publicBaseUrl: this.resolvedPublicBaseUrl() })));
     this.app.all('/mcp/:connectorKey', async (req, res) => {
@@ -87,9 +87,9 @@ export class LiteRuntime {
         if (!res.headersSent) res.status(500).json({ error: 'MCP transport failure.' });
       }
     });
-    this.app.post('/actions/extensions/discover', this.requireActionsAuth, async (req, res) => this.sendAction(res, await this.extensions.discover(req.body)));
-    this.app.post('/actions/extensions/register', this.requireActionsAuth, async (req, res) => this.sendAction(res, await this.extensions.register(req.body)));
-    this.app.post('/actions/extensions/call', this.requireActionsAuth, async (req, res) => this.sendAction(res, await this.extensions.call(req.body, { transport: 'actions', sessionId: typeof req.body.sessionId === 'string' ? req.body.sessionId : req.header('x-session-id') || undefined })));
+    this.app.post('/actions/extensions/discover', this.requireActionsAuth, async (req, res) => this.sendAction(res, await this.extensions.discover(req.body, { transport: 'actions' })));
+    this.app.post('/actions/extensions/register', this.requireActionsAuth, async (req, res) => this.sendAction(res, await this.extensions.register(req.body, { transport: 'actions' })));
+    this.app.post('/actions/extensions/call', this.requireActionsAuth, async (req, res) => this.sendAction(res, await this.extensions.call(req.body, { transport: 'actions' })));
     this.app.use((_req, res) => res.status(404).json({ error: 'Not found.' }));
     this.app.use((error: unknown, _req: Request, res: Response, _next: (error?: unknown) => void) => {
       this.log(error instanceof Error ? error.message : String(error), 'error');
@@ -108,7 +108,7 @@ export class LiteRuntime {
   };
 
   private sendAction(res: Response, response: ToolResponse): void {
-    const status = response.ok ? 200 : response.error?.code === 'NOT_FOUND' ? 404 : 400;
+    const status = response.ok ? 200 : response.error?.code === 'NOT_FOUND' ? 404 : response.error?.code === 'INVALID_IDENTITY' || response.error?.code === 'IDENTITY_REQUIRED' ? 401 : 400;
     res.status(status).json(response);
   }
 

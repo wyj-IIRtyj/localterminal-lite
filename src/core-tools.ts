@@ -3,9 +3,9 @@ import { spawn } from 'node:child_process';
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { LiteConfig } from './types.js';
-import type { LiteStore } from './store.js';
+import { LiteError, publicSession, type LiteStore } from './store.js';
 import { resolveWorkspacePath } from './security.js';
-import type { JsonObject, ToolDefinition } from './types.js';
+import type { JsonObject, TaskPackage, ToolDefinition } from './types.js';
 
 const IGNORED_DIRECTORIES = new Set(['.git', '.localterminal-lite', 'node_modules', 'dist', 'coverage', '.next', '.turbo']);
 
@@ -107,9 +107,9 @@ export function createBuiltinTools(config: LiteConfig, store: LiteStore): Map<st
   const add = (definition: ToolDefinition) => tools.set(definition.name, definition);
   const readOnly = { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true };
   const mutating = { readOnlyHint: false, destructiveHint: true, openWorldHint: false, idempotentHint: false };
-  const publicSession = <T extends { clientSessionKey?: string }>(session: T): Omit<T, 'clientSessionKey'> => {
-    const { clientSessionKey: _clientSessionKey, ...visible } = session;
-    return visible;
+  const actor = (context: Parameters<ToolDefinition['invoke']>[1]) => {
+    if (!context.authenticatedSession) throw new LiteError('IDENTITY_REQUIRED', 'Register or inherit a Lite session before calling this tool.');
+    return context.authenticatedSession;
   };
 
   add({
@@ -267,46 +267,93 @@ export function createBuiltinTools(config: LiteConfig, store: LiteStore): Map<st
     },
   });
 
+  const stringList = { type: 'array', items: { type: 'string' }, maxItems: 100 } as const;
+  const taskProperties = {
+    objective: { type: 'string', minLength: 1, maxLength: 4000 }, background: { type: 'string', minLength: 1, maxLength: 4000 },
+    deliverables: { ...stringList, minItems: 1 }, acceptanceCriteria: { ...stringList, minItems: 1 }, constraints: { ...stringList, minItems: 1 },
+  };
   add({
-    name: 'session_register', title: 'Register session', description: 'Register a collaborating ChatGPT session.',
-    inputSchema: { type: 'object', properties: { name: { type: 'string', minLength: 1, maxLength: 80 }, role: { type: 'string', maxLength: 80 } }, required: ['name'], additionalProperties: false }, annotations: mutating,
-    invoke: async (input, context) => ({ session: publicSession(store.registerSession({ name: asString(input.name, 'name'), role: asOptionalString(input.role), clientSessionKey: context.clientSessionKey })) }),
+    name: 'session_register', title: 'Register session', description: 'Create and claim a root session, or delegate one direct child from an authenticated root.',
+    inputSchema: {
+      type: 'object', properties: {
+        mode: { type: 'string', enum: ['root', 'delegate'], default: 'root' }, name: { type: 'string', minLength: 1, maxLength: 80 }, role: { type: 'string', maxLength: 80 },
+        continuesSessionId: { type: 'string' }, task: { type: 'object', properties: taskProperties, required: ['objective', 'background', 'deliverables', 'acceptanceCriteria', 'constraints'], additionalProperties: false },
+      }, required: ['mode', 'name'], additionalProperties: false,
+    }, annotations: mutating,
+    invoke: async (input, context) => {
+      const mode = input.mode === 'delegate' ? 'delegate' : 'root';
+      if (mode === 'root') {
+        const result = store.registerRoot({ name: asString(input.name, 'name'), role: asOptionalString(input.role), continuesSessionId: asOptionalString(input.continuesSessionId) });
+        return { session: publicSession(result.session), identity: result.identity, context: store.context(result.session.id) };
+      }
+      const current = actor(context);
+      if (!input.task || typeof input.task !== 'object' || Array.isArray(input.task)) throw new LiteError('INVALID_INPUT', 'task is required for delegate mode.');
+      const result = store.registerDelegate(current.id, { name: asString(input.name, 'name'), role: asOptionalString(input.role), task: input.task as TaskPackage, continuesSessionId: asOptionalString(input.continuesSessionId) });
+      return { session: publicSession(result.session), claimCode: result.claimCode, handoffPrompt: result.handoffPrompt };
+    },
   });
   add({
-    name: 'session_list', title: 'List sessions', description: 'List collaborating sessions and status.',
+    name: 'session_inherit', title: 'Inherit session', description: 'Claim a pending, stale, released, or TUI-revoked session with its one-time claim code.',
+    inputSchema: { type: 'object', properties: { sessionId: { type: 'string', minLength: 1 }, claimCode: { type: 'string', minLength: 1 } }, required: ['sessionId', 'claimCode'], additionalProperties: false }, annotations: mutating,
+    invoke: async (input) => {
+      const result = store.inherit(asString(input.sessionId, 'sessionId'), asString(input.claimCode, 'claimCode'));
+      return { session: publicSession(result.session), identity: result.identity, context: result.context };
+    },
+  });
+  add({
+    name: 'session_list', title: 'List sessions', description: 'List the audited session hierarchy, phases, presence, and continuation links.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false }, annotations: readOnly,
-    invoke: async () => ({ sessions: store.listSessions().map(publicSession) }),
+    invoke: async (_input, context) => { actor(context); return { sessions: store.listSessions().map(publicSession) }; },
   });
   add({
-    name: 'session_update', title: 'Update session', description: 'Update role, note, or collaboration status.',
-    inputSchema: { type: 'object', properties: { session: { type: 'string', minLength: 1 }, status: { type: 'string', enum: ['active', 'idle', 'blocked', 'completed'] }, note: { type: 'string', maxLength: 500 }, role: { type: 'string', maxLength: 80 } }, required: ['session'], additionalProperties: false }, annotations: mutating,
-    invoke: async (input) => ({ session: publicSession(store.updateSession(asString(input.session, 'session'), { status: input.status as never, note: asOptionalString(input.note), role: asOptionalString(input.role) })) }),
+    name: 'session_checkpoint', title: 'Checkpoint session', description: 'Record the required end-of-turn summary and phase; completion is immutable.',
+    inputSchema: { type: 'object', properties: { phase: { type: 'string', enum: ['pending', 'working', 'waiting', 'blocked', 'completed', 'cancelled'] }, summary: { type: 'string', minLength: 1, maxLength: 4000 }, nextSteps: stringList, blockers: stringList, artifacts: stringList, milestone: { type: 'string', maxLength: 1000 }, tags: stringList }, required: ['phase', 'summary'], additionalProperties: false }, annotations: mutating,
+    invoke: async (input, context) => ({ session: publicSession(store.checkpoint(actor(context).id, input)) }),
   });
   add({
-    name: 'session_unregister', title: 'Unregister session', description: 'Remove one collaborating session registration.',
-    inputSchema: { type: 'object', properties: { session: { type: 'string', minLength: 1 } }, required: ['session'], additionalProperties: false }, annotations: mutating,
-    invoke: async (input) => { store.unregisterSession(asString(input.session, 'session')); return { removed: true }; },
+    name: 'session_context', title: 'Read session context', description: 'Return the bounded 16K context projection for the authenticated session.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false }, annotations: readOnly,
+    invoke: async (_input, context) => ({ context: store.context(actor(context).id) }),
   });
   add({
-    name: 'message_send', title: 'Send session message', description: 'Send a durable message from one session to another.',
-    inputSchema: { type: 'object', properties: { from: { type: 'string' }, to: { type: 'string', minLength: 1 }, body: { type: 'string', minLength: 1, maxLength: 20_000 } }, required: ['to', 'body'], additionalProperties: false }, annotations: mutating,
-    invoke: async (input, context) => {
-      const current = store.resolveSession({ sessionId: asOptionalString(input.from) || context.sessionId, clientSessionKey: context.clientSessionKey });
-      return { message: store.sendMessage(current.id, asString(input.to, 'to'), asString(input.body, 'body')) };
-    },
+    name: 'session_release', title: 'Release session', description: 'Release the current controller and issue a new one-time handoff code.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false }, annotations: mutating,
+    invoke: async (_input, context) => { const result = store.release(actor(context).id); return { session: publicSession(result.session), claimCode: result.claimCode, handoffPrompt: result.handoffPrompt }; },
   });
   add({
-    name: 'message_inbox', title: 'Read session inbox', description: 'Read durable messages for one session and optionally acknowledge them.',
-    inputSchema: { type: 'object', properties: { session: { type: 'string' }, markRead: { type: 'boolean', default: false } }, additionalProperties: false }, annotations: { ...readOnly, readOnlyHint: false },
-    invoke: async (input, context) => {
-      const current = store.resolveSession({ sessionId: asOptionalString(input.session) || context.sessionId, clientSessionKey: context.clientSessionKey });
-      return { session: publicSession(current), messages: store.inbox(current.id, input.markRead === true) };
-    },
+    name: 'session_unregister', title: 'Release session (deprecated)', description: 'Compatibility alias for session_release. It never deletes history.',
+    inputSchema: { type: 'object', properties: { session: { type: 'string' } }, additionalProperties: false }, annotations: mutating,
+    invoke: async (_input, context) => { const result = store.release(actor(context).id); return { deprecated: true, replacement: 'session_release', removed: false, session: publicSession(result.session), claimCode: result.claimCode, handoffPrompt: result.handoffPrompt }; },
   });
   add({
-    name: 'message_list', title: 'List collaboration messages', description: 'List recent messages across registered sessions.',
+    name: 'session_tag', title: 'Tag session', description: 'Append audit-friendly tags to the authenticated session.',
+    inputSchema: { type: 'object', properties: { tags: { ...stringList, minItems: 1 } }, required: ['tags'], additionalProperties: false }, annotations: mutating,
+    invoke: async (input, context) => ({ session: publicSession(store.tag(actor(context).id, input.tags as string[])) }),
+  });
+  add({
+    name: 'session_subscribe', title: 'Subscribe to session', description: 'Subscribe the authenticated session to another session’s key progress.',
+    inputSchema: { type: 'object', properties: { targetSessionId: { type: 'string', minLength: 1 } }, required: ['targetSessionId'], additionalProperties: false }, annotations: mutating,
+    invoke: async (input, context) => { const current = actor(context); store.subscribe(current.id, asString(input.targetSessionId, 'targetSessionId')); return { subscribed: true, subscriberSessionId: current.id, targetSessionId: input.targetSessionId }; },
+  });
+  add({
+    name: 'session_events_ack', title: 'Acknowledge events', description: 'Acknowledge delivered event IDs; history remains permanent.',
+    inputSchema: { type: 'object', properties: { eventIds: { ...stringList, minItems: 1, maxItems: 100 } }, required: ['eventIds'], additionalProperties: false }, annotations: mutating,
+    invoke: async (input, context) => ({ acknowledged: store.acknowledgeEvents(actor(context).id, input.eventIds as string[]) }),
+  });
+  add({
+    name: 'message_send', title: 'Send session message', description: 'Send a durable message as the authenticated session; sender cannot be overridden.',
+    inputSchema: { type: 'object', properties: { to: { type: 'string', minLength: 1 }, body: { type: 'string', minLength: 1, maxLength: 20_000 } }, required: ['to', 'body'], additionalProperties: false }, annotations: mutating,
+    invoke: async (input, context) => ({ message: store.sendMessage(actor(context).id, asString(input.to, 'to'), asString(input.body, 'body')) }),
+  });
+  add({
+    name: 'message_inbox', title: 'Read session inbox', description: 'Read only the authenticated session’s durable inbox.',
+    inputSchema: { type: 'object', properties: { markRead: { type: 'boolean', default: false } }, additionalProperties: false }, annotations: { ...readOnly, readOnlyHint: false },
+    invoke: async (input, context) => { const current = actor(context); return { session: publicSession(current), messages: store.inbox(current.id, input.markRead === true) }; },
+  });
+  add({
+    name: 'message_list', title: 'List own collaboration messages', description: 'Compatibility view of the authenticated session inbox only.',
     inputSchema: { type: 'object', properties: { limit: { type: 'integer', minimum: 1, maximum: 1000 } }, additionalProperties: false }, annotations: readOnly,
-    invoke: async (input) => ({ messages: store.listMessages(typeof input.limit === 'number' ? input.limit : 100) }),
+    invoke: async (input, context) => { const current = actor(context); const messages = store.inbox(current.id); return { messages: messages.slice(-(typeof input.limit === 'number' ? input.limit : 100)) }; },
   });
   return tools;
 }
