@@ -55,8 +55,8 @@ test('both READMEs explain Chat mode purpose and repeat-launch commands', () => 
   assert.match(chinese, /第二次及以后快速启动/);
   assert.match(english, /register the global `localterminal-lite` command/);
   assert.match(chinese, /把 `localterminal-lite` 注册成当前用户的全局命令/);
-  assert.match(english, /```text\nlocalterminal-lite\n```/);
-  assert.match(chinese, /```text\nlocalterminal-lite\n```/);
+  assert.match(english, /```text\r?\nlocalterminal-lite\r?\n```/);
+  assert.match(chinese, /```text\r?\nlocalterminal-lite\r?\n```/);
 });
 
 test('installers persist a global launcher that records actual Bun and install paths', () => {
