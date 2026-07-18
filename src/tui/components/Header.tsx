@@ -6,7 +6,7 @@ export function Header({ theme, pending, zh }: { theme: Theme; pending: number; 
       <box flexDirection="row" gap={2} paddingLeft={1} paddingRight={1}>
         <text fg={theme.accent}><b>LocalTerminal Lite</b></text>
         <text fg={theme.good}>● {zh ? '运行中' : 'running'}</text>
-        <text fg={theme.muted}>v0.5.0</text>
+        <text fg={theme.muted}>v1.0.0</text>
       </box>
       {pending > 0 ? (
         <box backgroundColor={theme.bad} paddingLeft={1} paddingRight={1}>

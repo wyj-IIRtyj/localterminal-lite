@@ -1,14 +1,19 @@
 {
   "name": "localterminal-mcp-lite",
-  "version": "0.5.0",
+  "version": "1.0.0",
   "private": true,
-  "description": "Lite local WebDev MCP with dual-session collaboration, Apps and Actions adapters, extension tools, and a terminal UI.",
+  "description": "Local-first ChatGPT development bridge with auditable multi-session collaboration, Apps and Actions adapters, extensions, and a full OpenTUI interface.",
   "type": "module",
-  "license": "UNLICENSED",
+  "license": "Apache-2.0",
   "main": "dist/cli.js",
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE",
+    "SECURITY.md",
+    "docs",
+    "scripts"
   ],
   "bin": {
     "localterminal-lite": "dist/cli.js"

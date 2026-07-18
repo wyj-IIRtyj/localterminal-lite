@@ -62,7 +62,7 @@ export function buildOpenApi(config: LiteConfig) {
   const callRequest = objectSchema({ tool: { type: 'string', pattern: '^[a-z][a-z0-9_]{2,63}$' }, input: { $ref: '#/components/schemas/ExtensionToolInput' }, arguments: { $ref: '#/components/schemas/ExtensionToolInput' }, inputJson: { type: 'string' }, identity: { $ref: '#/components/schemas/SessionIdentity', description: 'Required except session_register(mode=root) and session_inherit.' } }, ['tool']);
   return {
     openapi: '3.1.0',
-    info: { title: 'LocalTerminal Lite Extensions', version: '0.5.0', description: 'Three-operation facade with explicit, auditable Lite session identity.' },
+    info: { title: 'LocalTerminal Lite Extensions', version: '1.0.0', description: 'Three-operation facade with explicit, auditable Lite session identity.' },
     servers: [{ url: config.publicBaseUrl }], security: [{ bearerAuth: [] }],
     paths: {
       '/actions/extensions/discover': { post: operation({ operationId: 'extensionDiscover', summary: 'Discover extensions and identity workflow', description: 'Without identity returns only bootstrap guidance. With identity returns the full catalog.', requestSchemaRef: '#/components/schemas/ExtensionDiscoverRequest', consequential: false, examples: { bootstrap: { value: {} }, catalog: { value: { identity: { sessionId: 'ses_example', sessionToken: 'token-from-registration' }, includeSchemas: true } } } }) },

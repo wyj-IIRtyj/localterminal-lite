@@ -1,153 +1,141 @@
 # LocalTerminal Lite
 
-LocalTerminal Lite 0.5.0 is a single-workspace development bridge with auditable, inheritable work sessions. It provides ChatGPT Apps (MCP), ChatGPT Actions (OpenAPI 3.1), a declarative extension registry, durable multi-session messages, and a full-window bilingual OpenTUI React interface.
+[中文](README.zh-CN.md) · [Actions tutorial](docs/ACTIONS_SETUP.md) · [GPT instructions](docs/GPT_INSTRUCTIONS.md) · [Prompt playbook](docs/PROMPT_PLAYBOOK.md) · [Privacy](docs/PRIVACY.md)
 
-The model-visible surface always contains exactly three facade tools:
+LocalTerminal Lite 1.0.0 connects one local project to ChatGPT through an auditable, inheritable work-session layer. It supports ChatGPT **Actions** and **Apps (MCP)**, multi-session collaboration, durable messages, declarative extensions, Git-style live diff tracking, and a full-window bilingual OpenTUI interface.
 
-- `extension_discover`
-- `extension_register`
-- `extension_call`
+![LocalTerminal Lite session hierarchy](docs/assets/tui/sessions-en.svg)
 
-Concrete workspace, Git, session, message, and custom tools remain behind that facade.
+## Start with one command
 
-## Install and run
+You do not need Git, Node.js, Bun, or another programming environment beforehand. The installers fetch Bun, download the fixed `v1.0.0` source archive, install locked dependencies, and start the TUI.
+
+### macOS
+
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.0.0/scripts/install-macos.sh)"
+```
+
+### Windows PowerShell
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.0.0/scripts/install-windows.ps1 | iex"
+```
+
+Remote scripts are convenient but security-sensitive. You can inspect [install-macos.sh](scripts/install-macos.sh) or [install-windows.ps1](scripts/install-windows.ps1) before running them.
+
+The first-run TUI configures everything: language, theme, authorized workspace, bind address, public URL, limits, Apps connector key, and Actions token. No `.env` or manual configuration-file editing is required.
+
+Already have Bun 1.3 or newer?
 
 ```bash
 git clone https://github.com/wyj-IIRtyj/localterminal-lite.git
 cd localterminal-lite
-bun install
+bun install --frozen-lockfile
 bun run dev
 ```
 
-Bun 1.3 or newer is required. No `.env` file is required. On first launch, an OpenTUI form configures language, theme, workspace, bind address, public URL, execution limits, Apps connector key, and Actions token. Press `c` later to change these settings safely.
+## Choose a connection
 
-For a previously configured non-interactive service:
+| Connection | Use it when | Endpoint shown by Lite |
+| --- | --- | --- |
+| GPT Actions | You are building a custom GPT with an OpenAPI Action. | `https://YOUR-HOST/openapi.json` |
+| ChatGPT Apps | Your eligible workspace supports custom MCP apps/connectors. | `https://YOUR-HOST/mcp/<hidden-connector-key>` |
+
+A GPT can use Apps or Actions, not both at once. For Actions, follow the complete privacy-safe [English tutorial](docs/ACTIONS_SETUP.md) or [Chinese tutorial](docs/ACTIONS_SETUP.zh-CN.md). It covers HTTPS tunneling, schema import, Bearer authentication, GPT setup, Preview testing, and common error messages.
+
+## Why three facade tools
+
+The model sees exactly three operations:
+
+- `extension_discover`: learn identity, concrete tools, schemas, and extension registration;
+- `extension_call`: invoke a concrete workspace, Git, session, message, or custom tool;
+- `extension_register`: validate, upsert, or remove a declarative extension.
+
+The small surface keeps configuration stable while concrete capabilities remain discoverable. In Actions, operation IDs use camelCase (`extensionDiscover`, `extensionCall`, `extensionRegister`) but preserve the same meanings.
+
+```text
+ChatGPT
+  └─ extensionCall
+       ├─ tool: session_register
+       ├─ input: { mode: "root", name: "main" }
+       └─ identity: { sessionId, sessionToken }  # after bootstrap
+```
+
+Use the supplied [GPT instructions](docs/GPT_INSTRUCTIONS.md) to prevent schema-layer mistakes, and give users the [short prompt playbook](docs/PROMPT_PLAYBOOK.md) instead of long prompts.
+
+## Auditable collaboration
+
+A Lite session is a work context, not a ChatGPT conversation ID.
+
+- New work creates and claims a root with `session_register(mode=root)`.
+- Delegation creates multiple direct child sessions with structured task packages; children cannot create grandchildren.
+- `session_inherit` claims pending, stale, released, or revoked unfinished work with a one-time claim code.
+- Completed work is immutable. Continue it with a same-level `session_register(...continuesSessionId)`, never with `session_inherit`.
+- Every work turn ends with a structured `session_checkpoint`.
+- Messages are durable, sender identity cannot be forged, and event delivery repeats until explicitly acknowledged.
+- Permanent JSONL history stores task packages, checkpoints, messages, state events, and sanitized tool audits.
+
+## TUI owner control plane
+
+The seven full-window pages are Overview, Sessions, Messages, Diff, Extensions, Settings, and Logs.
+
+![LocalTerminal Lite overview](docs/assets/tui/overview-en.svg)
+
+- Mouse wheel and keyboard scrolling use native OpenTUI ScrollBox viewports.
+- Drag selection is renderer-owned and copies through OSC 52 plus the host clipboard.
+- Continuations remain inside one logical session card; delegated children appear as indented directory-style nodes with phase and presence colors.
+- Enter opens complete session history or a two-way message conversation.
+- Diff shows staged, unstaged, and untracked workspace changes.
+- Logs can include sanitized factual tool calls from every session.
+- All settings and credential rotation stay inside the TUI.
+
+Input is routed in one order: modal → focused form control → current page → global shortcuts. OpenTUI owns alternate-screen lifecycle, mouse decoding, layout, wrapping, incremental drawing, and terminal restoration.
+
+## Security and privacy
+
+Lite is local-first and has no project telemetry. The selected workspace is a real read/write security boundary: use a dedicated project, review Diff and Logs, keep credentials masked, and stop public tunnels when not needed.
+
+- Connection credentials live in the operating-system user configuration directory.
+- Only session-token hashes are persisted.
+- Identity, authorization, claim-code, message-body, and content fields are redacted from audit argument snapshots.
+- Only the TUI owner can permanently delete sessions and history.
+
+Read the [privacy notice and deployment template](docs/PRIVACY.md). Public GPTs with Actions need a privacy policy that accurately covers the publisher's own endpoint and data flow.
+
+Report vulnerabilities through the private process in [SECURITY.md](SECURITY.md), never through a public issue containing credentials or private source.
+
+## Documentation map
+
+| Document | English | 中文 |
+| --- | --- | --- |
+| Full GPT Actions setup | [Open](docs/ACTIONS_SETUP.md) | [打开](docs/ACTIONS_SETUP.zh-CN.md) |
+| Recommended GPT preset instructions | [Open](docs/GPT_INSTRUCTIONS.md) | [打开](docs/GPT_INSTRUCTIONS.zh-CN.md) |
+| Short scenario prompts | [Open](docs/PROMPT_PLAYBOOK.md) | [打开](docs/PROMPT_PLAYBOOK.zh-CN.md) |
+| Privacy and deployment template | [Open](docs/PRIVACY.md) | [打开](docs/PRIVACY.zh-CN.md) |
+
+## Development and verification
+
+Requirements: Bun 1.3 or newer.
+
+```bash
+bun install --frozen-lockfile
+bun run typecheck
+bun run test
+bun run dev
+```
+
+The test suite covers OpenAPI 3.1, Actions and Apps identity, controller takeover, fixed checkpoint timing, parent/child completion, event ACK, subscriptions, durable history, redaction, migration, deletion, continuation, OpenTUI wheel scrolling, and drag selection.
+
+Headless mode is available only after first-run TUI setup:
 
 ```bash
 bun run build
 bun run start -- --headless
 ```
 
-## TUI
+## License
 
-The TUI is the owner control plane:
+Licensed under the [Apache License 2.0](LICENSE), which permits personal and commercial use, modification, and redistribution and includes an explicit patent grant. Third-party packages retain their own licenses.
 
-- `1`–`7` or Tab switches Overview, Sessions, Messages, Diff, Extensions, Settings, and Logs.
-- Sessions shows one structured tree card per logical session. Continuation records stay inside the card, delegated children are indented like directories under their parent, and colored phase/presence badges remain visible. Enter opens the complete permanent history.
-- Messages groups records by participant pair. Enter opens the complete two-way conversation.
-- Diff continuously tracks staged, unstaged, and untracked workspace changes with Git-style file, hunk, and `+`/`-` lines.
-- OpenTUI ScrollBox owns mouse-wheel, arrow-key, PageUp/PageDown, scrollbar, viewport culling, and content-size changes. Sessions, Messages, and Extensions use `j`/`k` for focused-item selection without taking wheel control away from the viewport.
-- `n` prepares a root session or creates a structured direct child under a selected root.
-- `u` opens actions for the focused session. Passive prompt copying never revokes a controller; revoke is always explicit.
-- `m` sends an owner-mediated session message.
-- `e` / `x` add or remove declarative custom extensions.
-- `c` edits all runtime configuration; `v` reveals credentials; `k` rotates connection credentials.
-- `a` on Logs toggles sanitized factual tool calls from every session.
-- `q` stops Lite.
-
-OpenTUI owns the alternate screen, terminal capability negotiation, mouse decoding, incremental rendering, teardown, layout, wrapping, focus, and scrolling. Lite does not attach raw stdin listeners, parse SGR mouse sequences, emit DECSET 1007, or write ANSI frames. Every long page is a real ScrollBox while the header, tabs, prompt modal, and contextual footer remain fixed. Mouse drag selection is handled by the renderer and copied through OSC 52 plus the host clipboard on macOS and Windows.
-
-All shortcuts enter through one OpenTUI keymap with fixed priority: modal → focused form control → current page → global commands. Forms remain inside the full-window TUI and use OpenTUI Input/Textarea controls; the application never temporarily switches into readline mode.
-
-Pending delegated sessions appear in a persistent red banner. Lite copies a handoff prompt to the clipboard, plays a best-effort native alert every 60 seconds, and sends an OS notification every five minutes until the session is claimed or cancelled. macOS uses native clipboard/audio/notifications; Windows/Linux use best-effort native commands and always retain the visible TUI banner.
-
-Only the TUI can permanently delete sessions. Before confirmation it displays the session name, state, objective, checkpoint/final summaries, children, message count, and permanent-history count. Deleting then requires the exact phrase shown by the TUI and cascades only through child sessions. Same-level continuation sessions remain and display a deleted-predecessor marker.
-
-## Session identity
-
-A Lite session is a work context, not a ChatGPT conversation ID. Its identity is:
-
-```json
-{
-  "sessionId": "ses_...",
-  "sessionToken": "returned-only-when-claimed"
-}
-```
-
-Tokens are returned only when a controller claims a session. Lite persists only their hashes and removes identity and claim fields from audit records.
-
-Unauthenticated callers can only:
-
-1. create and claim a root with `session_register(mode=root)`; or
-2. claim delegated/released unfinished work with `session_inherit(sessionId, claimCode)`.
-
-The three commonly confused flows are distinct:
-
-- resume/claim an existing unfinished session: `session_inherit`;
-- continue immutable completed work: `session_register(...continuesSessionId)`;
-- hand off the current controller: `session_release`, followed by `session_inherit` using the returned one-time claim code.
-
-Unauthenticated `extension_discover` returns only these bootstrap instructions. Every other concrete tool call and every extension registry change requires identity.
-
-Actions must include `identity` on every authenticated facade request. Apps may omit it only after one explicit verified identity call binds the current `openai/session` hint. That hint is never allowed to create, inherit, or independently identify a Lite session.
-
-Root bootstrap example:
-
-```json
-{
-  "tool": "session_register",
-  "input": { "mode": "root", "name": "main", "role": "lead" }
-}
-```
-
-Authenticated call example:
-
-```json
-{
-  "tool": "message_send",
-  "identity": { "sessionId": "ses_sender", "sessionToken": "..." },
-  "input": { "to": "ses_recipient", "body": "Please review this change." }
-}
-```
-
-## Collaboration lifecycle
-
-Session work phase and controller presence are independent:
-
-- phase: `pending | working | waiting | blocked | completed | cancelled`
-- presence: `unclaimed | claimed | stale`
-
-A root can delegate multiple direct children. Children cannot delegate grandchildren. Delegation requires `objective`, `background`, `deliverables`, `acceptanceCriteria`, and `constraints`; the inheriting child also receives a bounded projection of parent summaries and recent audit activity.
-
-After the first ordinary work call, a checkpoint window starts and later calls do not reset it:
-
-- 2 minutes: a `checkpoint_due` event is created.
-- 5 minutes: ordinary work is blocked until `session_checkpoint`.
-- 15 minutes without tool activity: the controller becomes stale and its token is invalidated.
-
-Before ending a work turn, call `session_checkpoint` with a 1–4000 character summary and the current phase. Optional fields include next steps, blockers, artifacts, milestone, and tags. Completing a session makes it immutable and releases its controller. A root cannot complete while direct children remain non-terminal; Lite returns `CHILD_REVIEW_REQUIRED` with child checkpoints, unread messages, and pending events.
-
-Continuing terminal work creates a same-level session with `continuesSessionId`; terminal sessions are never reopened.
-
-## Events, messages, and history
-
-Every authenticated facade response includes up to five unacknowledged events for that session. Unacknowledged events repeat until `session_events_ack`; acknowledgement never deletes history. Events include messages, child creation, subscription progress, milestones, phase changes, blocked/completed/stale state, checkpoint reminders, claims, releases, and revocations.
-
-Message sender identity is always the authenticated session. `message_send` accepts a recipient name or ID, `message_list` includes both sent and received records, and `message_conversation` returns one two-way thread. Roots automatically subscribe to direct children, and any session can subscribe to another session with `session_subscribe`.
-
-Persistence uses schema v2:
-
-- `.localterminal-lite/state.json` stores current materialized state, subscriptions, controller hashes, Apps bindings, events, and extensions.
-- `.localterminal-lite/history/<sessionId>.jsonl` permanently appends task packages, checkpoints, messages, state events, and sanitized tool audits.
-
-Audit argument snapshots are capped at 4000 characters. Identity, token, authorization, claim-code, body, and content fields are redacted. Automatic context inheritance remains a projection capped at 16000 characters, with up to 10 recent tool calls and 20 recent messages while prioritizing objectives, final summaries, and unread messages. Models can page through the complete permanent structured record with `session_history`; the TUI owner view can scroll the complete local record directly.
-
-Existing schema-v1 state migrates automatically: sessions become roots, old statuses map to phases, presence becomes stale, messages move into permanent history, and old ChatGPT client-session hints no longer grant identity.
-
-## Connect ChatGPT
-
-The Overview tab prints both endpoints, but masks the Apps connector path by default. Press `v` only when intentionally revealing credentials:
-
-- Apps: `https://your-domain.example/mcp/<connector-key>`
-- Actions schema: `https://your-domain.example/openapi.json`
-
-The Actions document is OpenAPI `3.1.0`, exposes exactly three operations, and uses a concrete object at `components.schemas`. Configure its Bearer authentication with the token shown in the Settings tab.
-
-## Verify
-
-```bash
-bun run typecheck
-bun run test
-```
-
-The suite covers Actions and Apps identity, controller takeover, fixed checkpoint timing, parent/child completion, event delivery and ACK, subscriptions, durable history, redaction, v1 migration, deletion, and continuation.
+LocalTerminal Lite is an independent open-source project and is not affiliated with or endorsed by OpenAI or Cloudflare. ChatGPT, OpenAI, and Cloudflare names are used only to describe interoperability.
