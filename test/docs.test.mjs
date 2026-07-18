@@ -36,13 +36,13 @@ test('bilingual documentation links resolve and private archive data is not publ
   }
 });
 
-test('stable release metadata and zero-environment installers stay pinned to v1.0.0', () => {
+test('stable release metadata and zero-environment installers stay pinned to v1.0.1', () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-  assert.equal(pkg.version, '1.0.0');
+  assert.equal(pkg.version, '1.0.1');
   assert.equal(pkg.license, 'Apache-2.0');
   for (const file of ['README.md', 'README.zh-CN.md', 'scripts/install-macos.sh', 'scripts/install-windows.ps1']) {
     const text = fs.readFileSync(path.join(root, file), 'utf8');
-    assert.match(text, /v1\.0\.0/);
+    assert.match(text, /v1\.0\.1/);
   }
 });
 
@@ -53,6 +53,19 @@ test('both READMEs explain Chat mode purpose and repeat-launch commands', () => 
   assert.match(chinese, /普通 Chat 对话模式也能以可控方式在本地电脑上工作/);
   assert.match(english, /Start it again later/);
   assert.match(chinese, /第二次及以后快速启动/);
-  assert.match(english, /\.bun\/bin\/bun.*run dev/);
-  assert.match(chinese, /\.bun\\bin\\bun\.exe.*run dev/);
+  assert.match(english, /register the global `localterminal-lite` command/);
+  assert.match(chinese, /把 `localterminal-lite` 注册成当前用户的全局命令/);
+  assert.match(english, /```text\r?\nlocalterminal-lite\r?\n```/);
+  assert.match(chinese, /```text\r?\nlocalterminal-lite\r?\n```/);
+});
+
+test('installers persist a global launcher that records actual Bun and install paths', () => {
+  const mac = fs.readFileSync(path.join(root, 'scripts', 'install-macos.sh'), 'utf8');
+  const windows = fs.readFileSync(path.join(root, 'scripts', 'install-windows.ps1'), 'utf8');
+  assert.match(mac, /launcher_path="\$launcher_dir\/localterminal-lite"/);
+  assert.match(mac, /exec %q run src\/cli\.ts/);
+  assert.match(mac, /add_launcher_to_path/);
+  assert.match(windows, /localterminal-lite\.cmd/);
+  assert.match(windows, /SetEnvironmentVariable\("Path", \$NewUserPath, "User"\)/);
+  assert.match(windows, /run src\/cli\.ts @args/);
 });
