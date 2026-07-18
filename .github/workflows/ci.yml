@@ -21,10 +21,25 @@ jobs:
         with:
           bun-version: 1.3.14
       - run: bun install --frozen-lockfile
-      - name: Validate macOS installer syntax
+      - name: Validate and exercise macOS installer
         if: runner.os == 'macOS'
-        run: bash -n scripts/install-macos.sh
-      - name: Validate Windows installer syntax
+        shell: bash
+        run: |
+          bash -n scripts/install-macos.sh
+          test_root="$RUNNER_TEMP/lite-installer-test"
+          mkdir -p "$test_root/home"
+          HOME="$test_root/home" \
+            SHELL=/bin/zsh \
+            LOCALTERMINAL_LITE_HOME="$test_root/app" \
+            LOCALTERMINAL_LITE_BIN_DIR="$test_root/bin" \
+            LOCALTERMINAL_LITE_ARCHIVE_URL="https://github.com/$GITHUB_REPOSITORY/archive/$GITHUB_SHA.tar.gz" \
+            LOCALTERMINAL_LITE_INSTALL_ONLY=1 \
+            bash scripts/install-macos.sh
+          test -x "$test_root/bin/localterminal-lite"
+          grep -Fq "$test_root/app" "$test_root/bin/localterminal-lite"
+          grep -Fq "$test_root/bin" "$test_root/home/.zprofile"
+          PATH="$test_root/bin:$PATH" command -v localterminal-lite
+      - name: Validate and exercise Windows installer
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -38,6 +53,18 @@ jobs:
           if ($errors.Count) {
             $errors | ForEach-Object { Write-Error $_.Message }
             exit 1
+          }
+          $testRoot = Join-Path $env:RUNNER_TEMP "lite-installer-test"
+          $env:LOCALTERMINAL_LITE_HOME = Join-Path $testRoot "app"
+          $env:LOCALTERMINAL_LITE_BIN_DIR = Join-Path $testRoot "bin"
+          $env:LOCALTERMINAL_LITE_ARCHIVE_URL = "https://github.com/$env:GITHUB_REPOSITORY/archive/$env:GITHUB_SHA.zip"
+          $env:LOCALTERMINAL_LITE_INSTALL_ONLY = "1"
+          & scripts/install-windows.ps1
+          if (-not (Test-Path (Join-Path $env:LOCALTERMINAL_LITE_BIN_DIR "localterminal-lite.cmd"))) {
+            throw "The global command launcher was not created."
+          }
+          if (-not (([Environment]::GetEnvironmentVariable("Path", "User") -split ';') -contains $env:LOCALTERMINAL_LITE_BIN_DIR)) {
+            throw "The launcher directory was not persisted to the user PATH."
           }
       - run: bun run typecheck
       - run: bun run test
