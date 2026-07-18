@@ -45,3 +45,14 @@ test('stable release metadata and zero-environment installers stay pinned to v1.
     assert.match(text, /v1\.0\.0/);
   }
 });
+
+test('both READMEs explain Chat mode purpose and repeat-launch commands', () => {
+  const english = fs.readFileSync(path.join(root, 'README.md'), 'utf8');
+  const chinese = fs.readFileSync(path.join(root, 'README.zh-CN.md'), 'utf8');
+  assert.match(english, /normal chat mode a controlled way to work on your local computer/);
+  assert.match(chinese, /普通 Chat 对话模式也能以可控方式在本地电脑上工作/);
+  assert.match(english, /Start it again later/);
+  assert.match(chinese, /第二次及以后快速启动/);
+  assert.match(english, /\.bun\/bin\/bun.*run dev/);
+  assert.match(chinese, /\.bun\\bin\\bun\.exe.*run dev/);
+});

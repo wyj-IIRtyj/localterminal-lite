@@ -2,21 +2,25 @@
 
 [中文](README.zh-CN.md) · [Actions tutorial](docs/ACTIONS_SETUP.md) · [GPT instructions](docs/GPT_INSTRUCTIONS.md) · [Prompt playbook](docs/PROMPT_PLAYBOOK.md) · [Privacy](docs/PRIVACY.md)
 
-LocalTerminal Lite 1.0.0 connects one local project to ChatGPT through an auditable, inheritable work-session layer. It supports ChatGPT **Actions** and **Apps (MCP)**, multi-session collaboration, durable messages, declarative extensions, Git-style live diff tracking, and a full-window bilingual OpenTUI interface.
+LocalTerminal Lite gives **ChatGPT's normal chat mode a controlled way to work on your local computer**. After you connect Lite through a custom GPT Action or a ChatGPT App, a regular ChatGPT conversation can inspect and edit the authorized local project, run bounded tools, coordinate multiple work sessions, and report progress while you retain control in a local TUI. Lite is the bridge between ChatGPT chat and your computer; it is not a replacement chat client.
+
+LocalTerminal Lite 1.0.0 provides that bridge through an auditable, inheritable work-session layer. It supports ChatGPT **Actions** and **Apps (MCP)**, multi-session collaboration, durable messages, declarative extensions, Git-style live diff tracking, and a full-window bilingual OpenTUI interface.
 
 ![LocalTerminal Lite session hierarchy](docs/assets/tui/sessions-en.svg)
 
-## Start with one command
+## Install and start
+
+### First installation
 
 You do not need Git, Node.js, Bun, or another programming environment beforehand. The installers fetch Bun, download the fixed `v1.0.0` source archive, install locked dependencies, and start the TUI.
 
-### macOS
+#### macOS
 
 ```bash
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.0.0/scripts/install-macos.sh)"
 ```
 
-### Windows PowerShell
+#### Windows PowerShell
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.0.0/scripts/install-windows.ps1 | iex"
@@ -26,7 +30,27 @@ Remote scripts are convenient but security-sensitive. You can inspect [install-m
 
 The first-run TUI configures everything: language, theme, authorized workspace, bind address, public URL, limits, Apps connector key, and Actions token. No `.env` or manual configuration-file editing is required.
 
-Already have Bun 1.3 or newer?
+### Start it again later
+
+Do not rerun the installer. Open Terminal or PowerShell and start the copy already installed in the default location.
+
+#### macOS
+
+```bash
+cd "$HOME/LocalTerminal-Lite" && "$HOME/.bun/bin/bun" run dev
+```
+
+#### Windows PowerShell
+
+```powershell
+Set-Location "$HOME\LocalTerminal-Lite"; & "$HOME\.bun\bin\bun.exe" run dev
+```
+
+If you chose a custom `LOCALTERMINAL_LITE_HOME`, replace the default folder above with that location. Lite reuses the settings saved through the TUI. If ChatGPT connects through a temporary Quick Tunnel, restart that tunnel separately; its random public URL may change.
+
+### Install from source
+
+If you already have Bun 1.3 or newer:
 
 ```bash
 git clone https://github.com/wyj-IIRtyj/localterminal-lite.git

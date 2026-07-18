@@ -2,21 +2,25 @@
 
 [English](README.md) · [Actions 教程](docs/ACTIONS_SETUP.zh-CN.md) · [GPT 预设指令](docs/GPT_INSTRUCTIONS.zh-CN.md) · [短提示词手册](docs/PROMPT_PLAYBOOK.zh-CN.md) · [隐私说明](docs/PRIVACY.zh-CN.md)
 
-LocalTerminal Lite 1.0.0 通过可审计、可继承的工作 session 层把一个本地项目连接到 ChatGPT。它同时支持 ChatGPT **Actions** 和 **Apps（MCP）**，并提供多 session 协作、永久消息、声明式扩展、Git 风格实时 diff，以及覆盖整个终端窗口的中英双语 OpenTUI 界面。
+LocalTerminal Lite 的核心目的，是让 **ChatGPT 的普通 Chat 对话模式也能以可控方式在本地电脑上工作**。通过为自定义 GPT 配置 Action，或接入 ChatGPT App，普通 ChatGPT 对话就可以查看和编辑获准的本地项目、运行受约束的工具、协调多个工作 session 并汇报进展；用户始终通过本地 TUI 保留控制权。Lite 是 ChatGPT Chat 与本地电脑之间的桥梁，不是另一个聊天客户端。
+
+LocalTerminal Lite 1.0.0 通过可审计、可继承的工作 session 层提供这座桥梁。它同时支持 ChatGPT **Actions** 和 **Apps（MCP）**，并提供多 session 协作、永久消息、声明式扩展、Git 风格实时 diff，以及覆盖整个终端窗口的中英双语 OpenTUI 界面。
 
 ![LocalTerminal Lite session 层级](docs/assets/tui/sessions-zh-CN.svg)
 
-## 一条命令启动
+## 安装与启动
+
+### 第一次安装
 
 无需提前安装 Git、Node.js、Bun 或其他编程环境。安装脚本会安装 Bun、下载固定的 `v1.0.0` 源码包、安装锁定依赖并启动 TUI。
 
-### macOS
+#### macOS
 
 ```bash
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.0.0/scripts/install-macos.sh)"
 ```
 
-### Windows PowerShell
+#### Windows PowerShell
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.0.0/scripts/install-windows.ps1 | iex"
@@ -25,6 +29,26 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubus
 直接运行远端脚本很方便，但也需要谨慎。执行前可以先检查 [macOS 安装脚本](scripts/install-macos.sh)或 [Windows 安装脚本](scripts/install-windows.ps1)。
 
 首次启动的 TUI 会完成全部配置：语言、主题、授权工作区、监听地址、公网 URL、限制、Apps connector key 和 Actions token。不需要 `.env`，也不需要手动修改配置文件。
+
+### 第二次及以后快速启动
+
+不要再次运行安装命令。打开终端或 PowerShell，直接启动默认安装目录中已有的程序。
+
+#### macOS
+
+```bash
+cd "$HOME/LocalTerminal-Lite" && "$HOME/.bun/bin/bun" run dev
+```
+
+#### Windows PowerShell
+
+```powershell
+Set-Location "$HOME\LocalTerminal-Lite"; & "$HOME\.bun\bin\bun.exe" run dev
+```
+
+如果第一次安装时设置了自定义 `LOCALTERMINAL_LITE_HOME`，请把上面的默认目录替换为实际目录。Lite 会继续使用此前通过 TUI 保存的配置。如果 ChatGPT 通过临时 Quick Tunnel 接入，还需要单独重新启动隧道；它的随机公网 URL 可能发生变化。
+
+### 从源码安装
 
 如果已经安装 Bun 1.3 或以上版本：
 
