@@ -12,7 +12,7 @@ import type { RuntimeReconfigure } from './tui/state.js';
 import type { LiteSettings } from './types.js';
 
 function help(): void {
-  console.log(`LocalTerminal Lite v0.5.0
+  console.log(`LocalTerminal Lite v1.0.0
 
 Usage:
   bun run dev                 Start the TUI (includes first-run setup)

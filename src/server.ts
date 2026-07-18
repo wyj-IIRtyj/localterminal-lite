@@ -72,7 +72,7 @@ export class LiteRuntime {
   }
 
   private configureRoutes(): void {
-    this.app.get('/health', (_req, res) => res.json({ ok: true, product: 'localterminal-lite', version: '0.5.0', toolsExposed: 3, sessions: this.store.listSessions().length, activeMcpSessions: this.activeMcpSessions() }));
+    this.app.get('/health', (_req, res) => res.json({ ok: true, product: 'localterminal-lite', version: '1.0.0', toolsExposed: 3, sessions: this.store.listSessions().length, activeMcpSessions: this.activeMcpSessions() }));
     this.app.get('/openapi.json', (_req, res) => res.json(buildOpenApi({ ...this.config, publicBaseUrl: this.resolvedPublicBaseUrl() })));
     this.app.get('/openapi-3.1.json', (_req, res) => res.json(buildOpenApi({ ...this.config, publicBaseUrl: this.resolvedPublicBaseUrl() })));
     this.app.all('/mcp/:connectorKey', async (req, res) => {
