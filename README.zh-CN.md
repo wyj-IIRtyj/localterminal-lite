@@ -85,11 +85,13 @@ ChatGPT
 Lite session 是工作上下文，不是 ChatGPT 对话 ID。
 
 - 新任务通过 `session_register(mode=root)` 创建并领取 root。
-- Root 可以用结构化任务包创建多个直接子 session；子 session 不得创建孙 session。
+- Root 可以用结构化任务包创建多个直接子 session；子 session 不得创建孙 session。任务应按领域、专家能力和可并行工作量拆分，不能把一个大型目标整体交给单个子 session。
+- 协作是主动的：在范围内且不会产生冲突时，session 可以直接帮助其他 session 完成部分工作，并通过永久消息交接可纳入成果。
 - `session_inherit` 使用一次性 claim code 领取 handoff/released/revoked 的未完成工作；同一 ChatGPT 对话因中断变 stale 时，可用之前的 sessionToken 重新领取原 session。
 - Completed 工作不可变。续作必须创建同级 `session_register(...continuesSessionId)`，不能调用 `session_inherit`。
-- 每轮工作都以结构化 `session_checkpoint` 结束。
-- 消息永久保存，发送者身份不可伪造；事件在显式 ACK 前会重复投递。
+- session 状态更新优先级最高。每轮工作的最后一个 LocalTerminal 调用必须是带准确 phase 的结构化 `session_checkpoint`。
+- Root 只有在所有直属子 session 终态、且所有子消息和事件都已审阅后才能完成。被阻止的完成请求会返回子 session 时间戳、最后活动、最近操作、消息时序和 `mustContinue` 指引。
+- 消息永久保存。AI 消息保留当前认证 session 身份；TUI 用户手动发送的消息明确标记为 `user`。读取消息时会返回发送/观察时间、消息年龄、发送后的审计操作和延迟/滞后提示。
 - 追加式 JSONL 历史记录任务包、checkpoint、消息、状态事件和脱敏工具审计。
 
 ## TUI 用户控制面板
@@ -104,7 +106,7 @@ Lite session 是工作上下文，不是 ChatGPT 对话 ID。
 - Enter 可打开完整 session 历史或双向消息对话。
 - Diff 展示 staged、unstaged 和 untracked 工作区变化。
 - Logs 可以显示所有 session 的脱敏事实工具调用。
-- 所有设置和凭据轮换都在 TUI 内完成。
+- 所有设置和凭据轮换都在 TUI 内完成。有限选项使用键盘/鼠标选择器；自由文本在首次输入时替换预填值，并支持 `Ctrl+U` 一键清空。按住 `V` 显示凭证，松开后自动隐藏。
 
 输入优先级固定为：模态框 → 当前表单控件 → 当前页面 → 全局快捷键。OpenTUI 负责 alternate screen 生命周期、鼠标解析、布局、换行、增量绘制和终端恢复。
 

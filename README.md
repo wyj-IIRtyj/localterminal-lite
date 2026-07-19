@@ -85,11 +85,13 @@ Use the supplied [GPT instructions](docs/GPT_INSTRUCTIONS.md) to prevent schema-
 A Lite session is a work context, not a ChatGPT conversation ID.
 
 - New work creates and claims a root with `session_register(mode=root)`.
-- Delegation creates multiple direct child sessions with structured task packages; children cannot create grandchildren.
+- Delegation creates multiple direct child sessions with structured task packages; children cannot create grandchildren. Split work by domain, expertise, and parallel workload rather than assigning one large objective wholesale to one child.
+- Collaboration is active: sessions may safely complete non-conflicting work for one another and hand off incorporable results through durable messages.
 - `session_inherit` uses a one-time claim code for handed-off/released/revoked unfinished work; the same interrupted ChatGPT conversation may reclaim its stale session with the previous sessionToken.
 - Completed work is immutable. Continue it with a same-level `session_register(...continuesSessionId)`, never with `session_inherit`.
-- Every work turn ends with a structured `session_checkpoint`.
-- Messages are durable, sender identity cannot be forged, and event delivery repeats until explicitly acknowledged.
+- Session state has highest priority. The final LocalTerminal call of every work turn is a structured `session_checkpoint` with the accurate phase.
+- A root cannot complete until every direct child is terminal and every child message/event has been reviewed. A blocked completion returns child timestamps, last activity, recent operations, message timing, and `mustContinue` guidance.
+- Messages are durable. AI messages keep the authenticated session identity; messages typed by the TUI owner are explicitly attributed to `user`. Message reads include send/observation timestamps, age, audited operations since send, and a delay/staleness notice.
 - Permanent JSONL history stores task packages, checkpoints, messages, state events, and sanitized tool audits.
 
 ## TUI owner control plane
@@ -104,7 +106,7 @@ The seven full-window pages are Overview, Sessions, Messages, Diff, Extensions, 
 - Enter opens complete session history or a two-way message conversation.
 - Diff shows staged, unstaged, and untracked workspace changes.
 - Logs can include sanitized factual tool calls from every session.
-- All settings and credential rotation stay inside the TUI.
+- All settings and credential rotation stay inside the TUI. Finite choices use keyboard/mouse selectors; free-text fields replace prefilled content on first typing and support `Ctrl+U` to clear. Hold `V` to reveal credentials and release it to hide them.
 
 Input is routed in one order: modal → focused form control → current page → global shortcuts. OpenTUI owns alternate-screen lifecycle, mouse decoding, layout, wrapping, incremental drawing, and terminal restoration.
 

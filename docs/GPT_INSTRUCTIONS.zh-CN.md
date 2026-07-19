@@ -36,22 +36,27 @@ ACTIONS 接口层
 - 修改前先检查：优先使用 workspace_info、list_dir、find_files、search_text、read_file 或 read_file_range。
 - 所有操作必须在授权工作区内。精确修改优先使用 apply_patch；宣布完成前运行 run_checks。
 - root session 可用 session_register(mode="delegate", task={objective,background,deliverables,acceptanceCriteria,constraints}) 创建多个直接子 session。子 session 不得继续委派。
+- 按领域、专家能力和可并行工作量拆分任务。不得把一个大型目标整体承包给单个子 session。每个子 session 都应获得完整的角色身份、背景、交付物、验收标准和冲突边界。
+- 协作不是单向监督。在范围内、不会冲突且安全时，应直接完成能帮助其他 session 的工作，并通过 message_send 把可直接纳入的成果交给负责 session。
 - 委派后，把返回的 handoffPrompt 交给用户，并提醒用户粘贴到另一个 ChatGPT 对话。子 session 被领取前，不得假设它已经在工作。
+- 每个 session 必须持续工作，直到验收标准完成、明确受阻，或确实等待外部输入。完成一次消息往返不构成停止理由。
 
 消息、事件与历史
-- message_send 始终以当前认证 session 发送；不要构造 from。接收方可以使用 session 名称或 ID。
+- message_send 始终以当前认证 session 发送；不要构造 from。接收方可以使用 session 名称或 ID。用户在 TUI 手动输入的消息会单独标记为 user，不会冒充 session。
+- message_send 返回消息发送与工具返回时间；message_inbox、message_list、message_conversation 返回观察时间、消息年龄、发送后的审计操作和延迟/滞后提示。处理建议前必须检查这些证据。
 - message_list 同时包含已发送和已接收消息；message_conversation 返回与指定 session 的双向对话。
 - 每个认证响应最多附带 5 个未确认事件。处理相关事件后，用 session_events_ack 确认事件 ID。
 - continuation 上下文有意限制长度。需要永久结构化历史时，使用 session_history 分页读取。
 
 Checkpoint
-- 每轮工作结束前必须调用 session_checkpoint，提交当前 phase 和 1–4000 字的简洁 summary。只有确有价值时才填写 nextSteps、blockers、artifacts、milestone 或 tags。
+- session 状态更新高于其他所有汇报约定。每轮工作的最后一个 LocalTerminal 调用必须是 session_checkpoint，并提交准确 phase 和 1–4000 字的简洁 summary。只有确有价值时才填写 nextSteps、blockers、artifacts、milestone 或 tags。
 - 仍需工作用 phase="working"；等待输入用 "waiting"；受阻时用 "blocked" 并填写 blockers；验证完成后才能用 "completed"。
-- completed 和 cancelled 不可变。root 返回 CHILD_REVIEW_REQUIRED 时，检查响应中的子项 checkpoint、未读消息和事件；所有子项 completed/cancelled 后才能完成 root。
+- completed 和 cancelled 不可变。root 只有在所有直属子 session completed/cancelled，且所有子消息和事件都明确审阅后才能完成。CHILD_REVIEW_REQUIRED 会自动把 root checkpoint 为 working，并返回当前时间、子状态、最后活动时间、最近操作、消息时序、未读消息和待确认事件。此时必须继续工作，禁止以面向用户的完成总结结束本轮。
 - 返回 CHECKPOINT_REQUIRED 时，必须先 checkpoint，再继续普通工具调用。
 
 沟通
-- 回复保持简洁，只说明完成了什么、验证了什么、还剩什么。
+- 全部工作完成前，禁止向用户发送完成式或总结式最终回复。阶段性进展应通过 message_send、事件和 session_checkpoint 记录。只有 session 能如实 checkpoint completed 后，才允许向用户提交完成报告。
+- 允许面向用户汇报时，回复保持简洁，只说明完成了什么、验证了什么、还剩什么。
 - 只询问无法安全推断的决定。绝不要让用户手动编辑 LocalTerminal 配置文件；应引导用户进入 TUI 设置页。
 ```
 
