@@ -12,6 +12,7 @@ import { LiteStore, SESSION_TIMING } from '../dist/store.js';
 import { WorkspaceDiffTracker } from '../dist/diff.js';
 import { conversationGroups, logicalSessionGroups, selectedViewport } from '../dist/tui-model.js';
 import { phaseColor, presenceColor, themeFor } from '../dist/tui/state.js';
+import { initialQuestionState, nextTextValue, optionAnswer, toggleSelectedOption, workspaceOptionLabel } from '../dist/tui/form-model.js';
 import { createDefaultSettings, loadLiteConfig, readLiteSettings, saveLiteSettings, settingsPath, validateSettingsFeasibility } from '../dist/config.js';
 import { appendWorkspaceLog, findAvailablePort, readWorkspaceLogs, readWorkspaceRegistry, resolveWorkspaceInput, workspaceChoiceHint, workspaceId } from '../dist/instances.js';
 import { migrateWorkspaceState } from '../dist/migration.js';
@@ -378,7 +379,22 @@ test('session resource cleanup refuses to kill a reused unrelated PID', async ()
   }
 });
 
-test('runtime close disarms session helpers but preserves the global passive-lock service', async () => {
+test('form option state submits the latest multi-select values and resets between questions', () => {
+  const fields = { label: 'Choose settings', options: ['port', 'passive-lock'], multiSelect: true };
+  const state = initialQuestionState(fields);
+  assert.deepEqual(state.selectedOptions, []);
+  const selected = toggleSelectedOption(state.selectedOptions, 'passive-lock');
+  assert.equal(optionAnswer(fields, 1, selected), 'passive-lock');
+  const nextQuestion = initialQuestionState({ label: 'Passive lock', fallback: 'standby', options: ['off', 'arm', 'standby'] });
+  assert.equal(nextQuestion.optionIndex, 2);
+  assert.deepEqual(nextQuestion.selectedOptions, []);
+  assert.equal(nextTextValue('3000', '30001', true), '1');
+  assert.equal(nextTextValue('3000', '3100', true), '3100');
+  assert.equal(nextTextValue('3000', '30001', false), '30001');
+  assert.equal(workspaceOptionLabel('LocalTerminal Lite', '/Users/example/localterminal-lite', 'active · 127.0.0.1:3000'), 'LocalTerminal Lite\n/Users/example/localterminal-lite\nactive · 127.0.0.1:3000');
+});
+
+test('runtime close disarms session helpers and stops the global passive-lock service', async () => {
   const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-resource-config-'));
   const workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-resource-workspace-'));
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-resource-state-'));
@@ -404,8 +420,11 @@ test('runtime close disarms session helpers but preserves the global passive-loc
     await runtime.close();
     await Promise.all(sessionChildren.map((child) => new Promise((resolve) => child.once('exit', resolve))));
     assert.equal(fs.readdirSync(directory).some((entry) => entry.endsWith('.pid')), false);
-    assert.doesNotThrow(() => process.kill(passiveChild.pid, 0));
-    assert.equal(passiveLockStatus(runtimeConfig).state, 'standby_requested');
+    if (passiveChild.exitCode === null) await new Promise((resolve) => {
+      const timer = setTimeout(resolve, 1_000);
+      passiveChild.once('exit', () => { clearTimeout(timer); resolve(); });
+    });
+    assert.equal(passiveLockStatus(runtimeConfig).running, false);
   } finally {
     for (const child of sessionChildren) child.kill('SIGKILL');
     passiveChild.kill('SIGKILL');

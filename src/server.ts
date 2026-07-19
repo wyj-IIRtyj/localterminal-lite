@@ -13,7 +13,7 @@ import { LiteStore } from './store.js';
 import { appendWorkspaceLog, upsertWorkspaceRecord, workspaceId } from './instances.js';
 import { PortClusterRegistry, tokenHash, type ClusterMember } from './cluster.js';
 import { CLUSTER_PROTOCOL_VERSION, CURRENT_VERSION } from './update.js';
-import { disarmAllSessionResources, passiveLockStatus, reapSessionResources, startPassiveLockService } from './session-resources.js';
+import { commandPassiveLock, disarmAllSessionResources, passiveLockStatus, reapSessionResources, startPassiveLockService } from './session-resources.js';
 import type { LiteConfig, ToolResponse } from './types.js';
 
 export type RuntimeLog = { at: string; level: 'info' | 'error'; message: string };
@@ -193,6 +193,10 @@ export class LiteRuntime {
   }
 
   async close(): Promise<void> {
+    if (process.platform === 'darwin') {
+      try { commandPassiveLock(this.config, 'stop'); }
+      catch (error) { this.log(error instanceof Error ? error.message : String(error), 'error'); }
+    }
     disarmAllSessionResources(this.config);
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     if (this.electionTimer) clearInterval(this.electionTimer);
