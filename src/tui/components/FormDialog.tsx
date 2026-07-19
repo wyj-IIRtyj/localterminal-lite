@@ -17,6 +17,8 @@ export function FormDialog({ questions, preamble, theme, width, height, zh, onCo
   const [index, setIndex] = useState(0);
   const [answers, setAnswers] = useState<string[]>([]);
   const [value, setValue] = useState(questions[0]?.fallback || '');
+  const [validation, setValidation] = useState<string>();
+  const [validating, setValidating] = useState(false);
   const valueRef = useRef(value);
   const inputRef = useRef<InputRenderable>(null);
   const textareaRef = useRef<TextareaRenderable>(null);
@@ -36,9 +38,17 @@ export function FormDialog({ questions, preamble, theme, width, height, zh, onCo
   }, [index, question?.multiline]);
 
   if (!question) return null;
+  const questionLabel = typeof question.label === 'function' ? question.label(answers) : question.label;
 
-  const submit = (raw: string) => {
+  const submit = async (raw: string) => {
     const answer = raw.trim() || question.fallback || '';
+    setValidation(undefined);
+    if (question.validate) {
+      setValidating(true);
+      const issue = await question.validate(answer, answers);
+      setValidating(false);
+      if (issue) { setValidation(issue); return; }
+    }
     const next = [...answers, answer];
     if (index === questions.length - 1) { onComplete(next); return; }
     const nextIndex = index + 1;
@@ -46,6 +56,7 @@ export function FormDialog({ questions, preamble, theme, width, height, zh, onCo
     setAnswers(next);
     setIndex(nextIndex);
     setValue(nextValue);
+    setValidation(undefined);
     valueRef.current = nextValue;
   };
 
@@ -57,13 +68,13 @@ export function FormDialog({ questions, preamble, theme, width, height, zh, onCo
           {preamble.length ? <text> </text> : null}
           {answers.map((answer, answerIndex) => (
             <box key={`answer-${answerIndex}`} flexDirection="column" marginBottom={1}>
-              <text fg={theme.muted} wrapMode="word">{questions[answerIndex].label}</text>
+              <text fg={theme.muted} wrapMode="word">{typeof questions[answerIndex].label === 'function' ? questions[answerIndex].label(answers.slice(0, answerIndex)) : questions[answerIndex].label}</text>
               <text fg={theme.text} wrapMode="word">{questions[answerIndex].sensitive ? '••••••••' : answer}</text>
             </box>
           ))}
         </scrollbox>
         <box flexDirection="column" flexShrink={0} marginTop={1}>
-          <text fg={theme.accent} wrapMode="word"><b>{index + 1}/{questions.length} · {question.label}</b></text>
+          <text fg={theme.accent} wrapMode="word"><b>{index + 1}/{questions.length} · {questionLabel}</b></text>
           {question.multiline ? (
             <textarea
               key={`textarea-${index}`}
@@ -79,7 +90,7 @@ export function FormDialog({ questions, preamble, theme, width, height, zh, onCo
               cursorColor={theme.accent}
               keyBindings={[{ name: 'return', ctrl: true, action: 'submit' }]}
               onContentChange={() => { valueRef.current = textareaRef.current?.plainText || ''; }}
-              onSubmit={() => submit(textareaRef.current?.plainText || valueRef.current)}
+              onSubmit={() => void submit(textareaRef.current?.plainText || valueRef.current)}
               focused
             />
           ) : (
@@ -94,10 +105,12 @@ export function FormDialog({ questions, preamble, theme, width, height, zh, onCo
               focusedTextColor={theme.selectedText}
               cursorColor={theme.accent}
               onInput={(next) => { valueRef.current = next; setValue(next); }}
-              onSubmit={() => submit(inputRef.current?.value || valueRef.current)}
+              onSubmit={() => void submit(inputRef.current?.value || valueRef.current)}
               focused
             />
           )}
+          {validation ? <text fg={theme.bad} wrapMode="word">{validation}</text> : null}
+          {validating ? <text fg={theme.warn}>{zh ? '正在校验…' : 'Validating…'}</text> : null}
           <text fg={theme.muted}>{question.multiline ? (zh ? 'Ctrl+Enter 下一步 · Esc 取消' : 'Ctrl+Enter next · Esc cancel') : (zh ? 'Enter 下一步 · Esc 取消' : 'Enter next · Esc cancel')}</text>
         </box>
       </box>

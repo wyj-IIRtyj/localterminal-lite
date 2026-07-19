@@ -1,4 +1,4 @@
-import { MacOSScrollAccel, type ScrollBoxRenderable } from '@opentui/core';
+import { type ScrollBoxRenderable } from '@opentui/core';
 import { useRenderer, useTerminalDimensions } from '@opentui/react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { conversationGroups, logicalSessionGroups } from '../tui-model.js';
@@ -36,9 +36,8 @@ export function App({ controller, onExit }: { controller: TuiController; onExit:
   const scrollRef = useRef<ScrollBoxRenderable>(null);
   const exiting = useRef(false);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const scrollAcceleration = useMemo(() => new MacOSScrollAccel(), []);
   const snapshot = controller.snapshot();
-  const { runtime, state, diff, logs } = snapshot;
+  const { runtime, state, diff, logs, update } = snapshot;
   const zh = runtime.config.uiLanguage === 'zh-CN';
   const theme = themeFor(runtime.config.uiTheme);
   const pending = state.sessions.filter((session) => !['completed', 'cancelled'].includes(session.phase) && session.presence !== 'claimed').length;
@@ -135,6 +134,7 @@ export function App({ controller, onExit }: { controller: TuiController; onExit:
   const configureAction = useCallback(() => runAction(() => controller.editSettings(ask)), [runAction, controller, ask]);
   const toggleCredentials = useCallback(() => setRevealCredentials((value) => !value), []);
   const rotateCredentialsAction = useCallback(() => runAction(async () => { await controller.rotateCredentials(ask); setRevealCredentials(true); }), [runAction, controller, ask]);
+  const updateApplicationAction = useCallback(() => runAction(() => controller.updateApplication(ask)), [runAction, controller, ask]);
   const toggleAudit = useCallback(() => setShowAudit((value) => !value), []);
   const pageActions = useMemo(() => ({
     enabled: !form,
@@ -155,8 +155,9 @@ export function App({ controller, onExit }: { controller: TuiController; onExit:
     configure: configureAction,
     toggleCredentials,
     rotateCredentials: rotateCredentialsAction,
+    updateApplication: updateApplicationAction,
     toggleAudit,
-  }), [form, tab, detail, switchTab, nextTab, back, quit, moveSelection, open, createSessionAction, sessionAction, sendMessageAction, refreshDiffAction, addExtensionAction, removeExtensionAction, configureAction, toggleCredentials, rotateCredentialsAction, toggleAudit]);
+  }), [form, tab, detail, switchTab, nextTab, back, quit, moveSelection, open, createSessionAction, sessionAction, sendMessageAction, refreshDiffAction, addExtensionAction, removeExtensionAction, configureAction, toggleCredentials, rotateCredentialsAction, updateApplicationAction, toggleAudit]);
   useAppKeymap(pageActions);
 
   const copySelection = useCallback(() => {
@@ -177,7 +178,7 @@ export function App({ controller, onExit }: { controller: TuiController; onExit:
           : tab === 2 ? <Messages state={state} selected={activeSelection} theme={theme} zh={zh} onSelect={selectItem} />
             : tab === 3 ? <DiffScreen snapshot={diff} theme={theme} zh={zh} />
               : tab === 4 ? <Extensions state={state} selected={activeSelection} theme={theme} zh={zh} onSelect={selectItem} />
-                : tab === 5 ? <Settings runtime={runtime} theme={theme} zh={zh} reveal={revealCredentials} />
+                : tab === 5 ? <Settings runtime={runtime} theme={theme} zh={zh} reveal={revealCredentials} update={update} />
                   : <Logs runtime={runtime} logs={logs} theme={theme} zh={zh} showAudit={showAudit} />;
 
   const scrollKey = `${tab}-${detail?.kind || 'page'}-${detail?.id || ''}`;
@@ -195,7 +196,6 @@ export function App({ controller, onExit }: { controller: TuiController; onExit:
         viewportCulling
         stickyScroll={detail?.kind === 'conversation'}
         stickyStart={detail?.kind === 'conversation' ? 'bottom' : undefined}
-        scrollAcceleration={scrollAcceleration}
         verticalScrollbarOptions={{ visible: true }}
       >
         {content}

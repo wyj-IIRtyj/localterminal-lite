@@ -26,7 +26,7 @@ export function buildOpenApi(config: LiteConfig) {
   }, ['objective', 'background', 'deliverables', 'acceptanceCriteria', 'constraints']);
   const toolInput = objectSchema({
     mode: { type: 'string', enum: ['root', 'delegate'] }, name: { type: 'string' }, role: { type: 'string' }, session: { type: 'string' },
-    sessionId: { type: 'string' }, claimCode: { type: 'string' }, continuesSessionId: { type: 'string' }, task: { $ref: '#/components/schemas/TaskPackage' },
+    sessionId: { type: 'string' }, sessionToken: { type: 'string' }, claimCode: { type: 'string' }, continuesSessionId: { type: 'string' }, task: { $ref: '#/components/schemas/TaskPackage' },
     phase: { type: 'string', enum: ['pending', 'working', 'waiting', 'blocked', 'completed', 'cancelled'] }, summary: { type: 'string', minLength: 1, maxLength: 4000 },
     nextSteps: stringArray, blockers: stringArray, artifacts: stringArray, milestone: { type: 'string' }, tags: stringArray,
     targetSessionId: { type: 'string' }, eventIds: stringArray, to: { type: 'string' }, body: { type: 'string' }, markRead: { type: 'boolean' }, limit: { type: 'integer' },
@@ -70,6 +70,7 @@ export function buildOpenApi(config: LiteConfig) {
       '/actions/extensions/call': { post: operation({ operationId: 'extensionCall', summary: 'Invoke one concrete extension', description: 'Bootstrap a root or inherit a session without identity; all other calls require identity.', requestSchemaRef: '#/components/schemas/ExtensionCallRequest', consequential: true, examples: {
         registerRoot: { value: { tool: 'session_register', input: { mode: 'root', name: 'main', role: 'lead' } } },
         inheritChild: { value: { tool: 'session_inherit', input: { sessionId: 'ses_child', claimCode: 'one-time-code' } } },
+        reclaimStale: { value: { tool: 'session_inherit', input: { sessionId: 'ses_stale', sessionToken: 'previous-session-token' } } },
         sendMessage: { value: { tool: 'message_send', identity: { sessionId: 'ses_sender', sessionToken: 'token-from-registration' }, input: { to: 'ses_recipient', body: 'Please review this change.' } } },
       } }) },
     },

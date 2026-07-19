@@ -140,12 +140,18 @@ export class LiteStore {
     return this.createDelegate(root, args, predecessor);
   }
 
-  inherit(sessionId: string, claimCode: string): { session: LiteSession; identity: SessionIdentity; context: JsonObject } {
+  inherit(sessionId: string, credentials: { claimCode?: string; sessionToken?: string }): { session: LiteSession; identity: SessionIdentity; context: JsonObject } {
     this.refreshTemporalStates();
     const session = this.requireSession(sessionId);
     if (TERMINAL_PHASES.has(session.phase)) throw new LiteError('SESSION_TERMINAL', 'Terminal sessions are immutable; create a continuation session.');
     if (session.presence === 'claimed') throw new LiteError('SESSION_ALREADY_CLAIMED', 'This session has a fresh active controller.');
-    if (!equalHash(claimCode, session.claimCodeHash)) throw new LiteError('INVALID_CLAIM_CODE', 'The claim code is invalid or has already been used.');
+    const validClaim = credentials.claimCode ? equalHash(credentials.claimCode, session.claimCodeHash) : false;
+    const validStaleToken = session.presence === 'stale' && credentials.sessionToken && session.controller
+      ? equalHash(credentials.sessionToken, session.controller.tokenHash)
+      : false;
+    if (!validClaim && !validStaleToken) {
+      throw new LiteError('INVALID_RECOVERY_CREDENTIAL', 'Use the one-time claimCode for handoff/revoked/released work, or the previous sessionToken to reclaim the same stale session.');
+    }
     const identity = this.claimFresh(session);
     delete session.claimCodeHash;
     delete session.claimCodeIssuedAt;
@@ -161,7 +167,7 @@ export class LiteStore {
     this.refreshTemporalStates();
     const session = this.requireSession(identity.sessionId);
     if (session.presence !== 'claimed' || !session.controller || !equalHash(identity.sessionToken, session.controller.tokenHash)) {
-      throw new LiteError('INVALID_IDENTITY', 'The sessionId/sessionToken pair is invalid, stale, or revoked.');
+      throw new LiteError('INVALID_IDENTITY', 'The session identity is no longer active. If this same ChatGPT conversation was interrupted and the session became stale, call session_inherit without identity using input {sessionId, sessionToken:<previous token>} to reclaim the original unfinished session. For release/revoke/handoff, use a fresh one-time claimCode from the TUI. Never create a new root for the same unfinished task.');
     }
     return structuredClone(session);
   }
@@ -426,7 +432,6 @@ export class LiteStore {
         session.presence = 'stale';
         session.claimCodeHash = undefined;
         const code = this.issueClaimCode(session);
-        delete session.controller;
         const stalePayload = { staleAt: this.iso(), reclaimRequired: true, claimCodeRotated: Boolean(code) };
         this.emitEvent(session.id, session.id, 'stale', stalePayload);
         this.notifyProgress(session, 'stale', stalePayload);

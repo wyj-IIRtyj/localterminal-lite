@@ -1,5 +1,9 @@
 import { randomBytes } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import net from 'node:net';
+import http from 'node:http';
+import { describePortOwner, portOwner, upsertWorkspaceRecord, workspaceId, workspaceStateDir } from './instances.js';
+import { migrateWorkspaceState } from './migration.js';
 import os from 'node:os';
 import path from 'node:path';
 import type { LiteConfig, LiteSettings } from './types.js';
@@ -61,8 +65,10 @@ export function createDefaultSettings(workspaceDir = defaultWorkspaceForCwd()): 
     commandTimeoutSec: 60,
     uiLanguage: 'zh-CN',
     uiTheme: 'dark',
+    passiveLockEnabled: false,
   };
 }
+
 
 export function validateSettings(settings: LiteSettings): string[] {
   const errors: string[] = [];
@@ -75,7 +81,42 @@ export function validateSettings(settings: LiteSettings): string[] {
   if (!Number.isInteger(settings.commandTimeoutSec) || settings.commandTimeoutSec < 1 || settings.commandTimeoutSec > 3600) errors.push('Command timeout must be from 1 to 3600 seconds.');
   if (!['en', 'zh-CN'].includes(settings.uiLanguage)) errors.push('UI language must be en or zh-CN.');
   if (!['dark', 'light'].includes(settings.uiTheme)) errors.push('UI theme must be dark or light.');
+  if (typeof settings.passiveLockEnabled !== 'boolean') errors.push('Passive lock enabled must be boolean.');
   return errors;
+}
+
+
+export async function validateSettingsFeasibility(settings: LiteSettings, current?: { host: string; port: number }): Promise<string[]> {
+  const errors = validateSettings(settings);
+  if (errors.length || settings.port === 0 || (current && current.host === settings.host && current.port === settings.port)) return errors;
+  const portError = await new Promise<string | undefined>((resolve) => {
+    const probe = net.createServer();
+    probe.unref();
+    probe.once('error', (error: NodeJS.ErrnoException) => {
+      if (error.code === 'EADDRINUSE') {
+        const owner = portOwner(settings.port);
+        if (owner?.pid === process.pid) { resolve(undefined); return; }
+        const request = http.get({ host: settings.host, port: settings.port, path: '/health', timeout: 1000 }, (response) => {
+          let body = '';
+          response.setEncoding('utf8');
+          response.on('data', (chunk) => { body += chunk; });
+          response.on('end', () => {
+            try {
+              const health = JSON.parse(body) as { product?: string; clustered?: boolean };
+              if (response.statusCode === 200 && health.product === 'localterminal-lite' && health.clustered === true) { resolve(undefined); return; }
+            } catch { /* unrelated service */ }
+            resolve(`Port ${settings.port} is already in use on ${settings.host} (${describePortOwner(settings.port)}).`);
+          });
+        });
+        request.once('timeout', () => request.destroy());
+        request.once('error', () => resolve(`Port ${settings.port} is already in use on ${settings.host} (${describePortOwner(settings.port)}).`));
+        return;
+      }
+      resolve(`Cannot listen on ${settings.host}:${settings.port}: ${error.message}`);
+    });
+    probe.listen(settings.port, settings.host, () => probe.close(() => resolve(undefined)));
+  });
+  return portError ? [...errors, portError] : errors;
 }
 
 export function readLiteSettings(env: NodeJS.ProcessEnv = process.env): LiteSettings | undefined {
@@ -83,7 +124,7 @@ export function readLiteSettings(env: NodeJS.ProcessEnv = process.env): LiteSett
   if (!existsSync(configPath)) return undefined;
   const parsed = JSON.parse(readFileSync(configPath, 'utf8')) as Partial<LiteSettings>;
   if (parsed.schemaVersion !== 1) throw new Error(`Unsupported Lite settings format: ${configPath}`);
-  const settings = { uiLanguage: 'zh-CN', uiTheme: 'dark', ...parsed } as LiteSettings;
+  const settings = { uiLanguage: 'zh-CN', uiTheme: 'dark', passiveLockEnabled: false, ...parsed } as LiteSettings;
   const errors = validateSettings(settings);
   if (errors.length) throw new Error(`Invalid Lite settings: ${errors.join(' ')}`);
   return settings;
@@ -137,8 +178,14 @@ export function loadLiteConfig(env: NodeJS.ProcessEnv = process.env): LiteConfig
   const errors = validateSettings(settings);
   if (errors.length) throw new Error(errors.join(' '));
   const workspaceDir = realpathSync(settings.workspaceDir);
-  const stateDir = path.join(workspaceDir, '.localterminal-lite');
+  const configDir = path.dirname(settingsPath(env));
+  const stateDir = workspaceStateDir(configDir, workspaceDir);
+  const legacyGlobalStateDir = path.join(configDir, 'state');
+  const migratedGlobalStateDir = path.join(configDir, 'state.migrated');
+  const legacyStateDir = path.join(workspaceDir, '.localterminal-lite');
+  migrateWorkspaceState(stateDir, [legacyGlobalStateDir, migratedGlobalStateDir, legacyStateDir]);
   mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  upsertWorkspaceRecord(configDir, { id: workspaceId(workspaceDir), workspaceDir, stateDir, lastHost: settings.host, lastPort: settings.port, lastSeenAt: new Date().toISOString() });
   const publicBaseUrl = settings.publicBaseUrl || `http://${settings.host}:${settings.port}`;
   return {
     settingsPath: settingsPath(env),
@@ -153,6 +200,7 @@ export function loadLiteConfig(env: NodeJS.ProcessEnv = process.env): LiteConfig
     commandTimeoutSec: settings.commandTimeoutSec,
     uiLanguage: settings.uiLanguage,
     uiTheme: settings.uiTheme,
+    passiveLockEnabled: settings.passiveLockEnabled,
   };
 }
 

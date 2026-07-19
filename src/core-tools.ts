@@ -6,6 +6,7 @@ import type { LiteConfig } from './types.js';
 import { LiteError, publicSession, type LiteStore } from './store.js';
 import { resolveWorkspacePath } from './security.js';
 import type { JsonObject, TaskPackage, ToolDefinition } from './types.js';
+import { disarmSessionResources } from './session-resources.js';
 
 const IGNORED_DIRECTORIES = new Set(['.git', '.localterminal-lite', 'node_modules', 'dist', 'coverage', '.next', '.turbo']);
 
@@ -293,10 +294,13 @@ export function createBuiltinTools(config: LiteConfig, store: LiteStore): Map<st
     },
   });
   add({
-    name: 'session_inherit', title: 'Inherit session', description: 'Claim a pending, stale, released, or TUI-revoked session with its one-time claim code.',
-    inputSchema: { type: 'object', properties: { sessionId: { type: 'string', minLength: 1 }, claimCode: { type: 'string', minLength: 1 } }, required: ['sessionId', 'claimCode'], additionalProperties: false }, annotations: mutating,
+    name: 'session_inherit', title: 'Inherit session', description: 'Claim unfinished work. Use claimCode for handoff/released/revoked sessions, or the previous sessionToken to reclaim the same stale session after an interrupted ChatGPT run.',
+    inputSchema: { type: 'object', properties: { sessionId: { type: 'string', minLength: 1 }, claimCode: { type: 'string', minLength: 1 }, sessionToken: { type: 'string', minLength: 1 } }, required: ['sessionId'], additionalProperties: false }, annotations: mutating,
     invoke: async (input) => {
-      const result = store.inherit(asString(input.sessionId, 'sessionId'), asString(input.claimCode, 'claimCode'));
+      const claimCode = asOptionalString(input.claimCode);
+      const sessionToken = asOptionalString(input.sessionToken);
+      if (!claimCode && !sessionToken) throw new LiteError('INVALID_INPUT', 'Provide claimCode or the previous sessionToken.');
+      const result = store.inherit(asString(input.sessionId, 'sessionId'), { claimCode, sessionToken });
       return { session: publicSession(result.session), identity: result.identity, context: result.context };
     },
   });
@@ -308,7 +312,12 @@ export function createBuiltinTools(config: LiteConfig, store: LiteStore): Map<st
   add({
     name: 'session_checkpoint', title: 'Checkpoint session', description: 'Record the required end-of-turn summary and phase; completion is immutable.',
     inputSchema: { type: 'object', properties: { phase: { type: 'string', enum: ['pending', 'working', 'waiting', 'blocked', 'completed', 'cancelled'] }, summary: { type: 'string', minLength: 1, maxLength: 4000 }, nextSteps: stringList, blockers: stringList, artifacts: stringList, milestone: { type: 'string', maxLength: 1000 }, tags: stringList }, required: ['phase', 'summary'], additionalProperties: false }, annotations: mutating,
-    invoke: async (input, context) => ({ session: publicSession(store.checkpoint(actor(context).id, input)) }),
+    invoke: async (input, context) => {
+      const current = actor(context);
+      const session = store.checkpoint(current.id, input);
+      if (session.phase === 'completed' || session.phase === 'cancelled') disarmSessionResources(config, current.id);
+      return { session: publicSession(session) };
+    },
   });
   add({
     name: 'session_context', title: 'Read session context', description: 'Return the bounded 16K context projection for the authenticated session.',

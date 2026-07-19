@@ -4,14 +4,17 @@ import { WorkspaceDiffTracker, type DiffSnapshot } from '../diff.js';
 import { logicalSessionGroups } from '../tui-model.js';
 import type { LiteRuntime, RuntimeLog } from '../server.js';
 import type { CustomExtensionSpec, LiteSession, LiteSettings, SessionPhase, StoredState, TaskPackage } from '../types.js';
-import { maskCredential, readLiteSettings, rotateLiteCredentials, validateSettings } from '../config.js';
+import { isDirectory, isValidPublicBaseUrl, maskCredential, readLiteSettings, rotateLiteCredentials, settingsPath, validateSettingsFeasibility } from '../config.js';
+import { describePortOwner, findAvailablePort, readWorkspaceRegistry, resolveWorkspaceInput, terminatePortOwner, workspaceChoiceHint } from '../instances.js';
+import { checkForUpdate, installUpdate, isSourceCheckout, type UpdateStatus } from '../update.js';
+import { commandPassiveLock, passiveLockStatus } from '../session-resources.js';
 
 export const TABS = ['Overview', 'Sessions', 'Messages', 'Diff', 'Extensions', 'Settings', 'Logs'] as const;
 export type Tab = (typeof TABS)[number];
 export type Detail = { kind: 'session'; id: string } | { kind: 'conversation'; id: string };
 export type RuntimeReconfigureResult = { runtime: LiteRuntime; error?: string };
 export type RuntimeReconfigure = (settings: LiteSettings) => Promise<RuntimeReconfigureResult>;
-export type FormQuestion = { label: string; fallback?: string; multiline?: boolean; sensitive?: boolean };
+export type FormQuestion = { label: string | ((previous: string[]) => string); fallback?: string; multiline?: boolean; sensitive?: boolean; validate?: (value: string, previous: string[]) => string | undefined | Promise<string | undefined> };
 export type Ask = (questions: FormQuestion[], preamble?: string[]) => Promise<string[] | undefined>;
 
 export type Theme = {
@@ -99,6 +102,7 @@ export type TuiSnapshot = {
   diff: DiffSnapshot;
   logs: RuntimeLog[];
   runtime: LiteRuntime;
+  update: UpdateStatus;
 };
 
 export class TuiController {
@@ -106,6 +110,7 @@ export class TuiController {
   private readonly handoffs = new Map<string, string>();
   private readonly remindedAt = new Map<string, { sound: number; notification: number }>();
   private stopped = false;
+  private update: UpdateStatus = { currentVersion: '1.0.1', updateAvailable: false, checking: true };
 
   constructor(private currentRuntime: LiteRuntime, private readonly reconfigure: RuntimeReconfigure) {
     this.diff = new WorkspaceDiffTracker(currentRuntime.config);
@@ -115,13 +120,43 @@ export class TuiController {
   get zh(): boolean { return this.currentRuntime.config.uiLanguage === 'zh-CN'; }
   text(en: string, zh: string): string { return this.zh ? zh : en; }
 
-  start(): void { this.diff.start(); }
+  start(): void { this.diff.start(); void this.refreshUpdateStatus(); }
 
   snapshot(): TuiSnapshot {
-    return { state: this.currentRuntime.store.snapshot(), diff: this.diff.snapshot(), logs: [...this.currentRuntime.logs], runtime: this.currentRuntime };
+    return { state: this.currentRuntime.store.snapshot(), diff: this.diff.snapshot(), logs: [...this.currentRuntime.logs], runtime: this.currentRuntime, update: { ...this.update } };
   }
 
   async refreshDiff(): Promise<void> { await this.diff.refresh(); }
+
+  async refreshUpdateStatus(): Promise<void> {
+    this.update = { ...this.update, checking: true, error: undefined };
+    this.update = await checkForUpdate();
+    if (this.update.updateAvailable) this.currentRuntime.log(`Update available: ${this.update.currentVersion} -> ${this.update.latestVersion}`, 'info');
+  }
+
+  async updateApplication(ask: Ask): Promise<void> {
+    await this.refreshUpdateStatus();
+    if (!this.update.updateAvailable || !this.update.latestVersion) {
+      this.currentRuntime.log(this.update.error || this.text('LocalTerminal Lite is already up to date.', 'LocalTerminal Lite 已是最新版本。'));
+      return;
+    }
+    if (isSourceCheckout()) {
+      this.currentRuntime.log(this.text('One-click update is disabled for a Git source checkout. Pull and review changes manually.', 'Git 源码工作区已禁用一键更新，请手动拉取并审查更改。'), 'error');
+      return;
+    }
+    const answer = await ask([{ label: this.text(`Install ${this.update.latestVersion} now? yes|no`, `立即安装 ${this.update.latestVersion}？yes|no`), fallback: 'no' }]);
+    if (!answer || !['yes', 'y'].includes(answer[0].toLowerCase())) return;
+    this.currentRuntime.log(`Installing LocalTerminal Lite ${this.update.latestVersion}...`);
+    const clusterVersions = this.currentRuntime.clusterVersions();
+    const members = this.currentRuntime.clusterMemberCount();
+    await installUpdate(this.update.latestVersion);
+    this.update = { ...this.update, updateAvailable: false, restartRequired: true, runningClusterVersions: clusterVersions };
+    this.currentRuntime.log(this.text(
+      `Update installed without stopping ${members} running process(es). Existing Apps/Actions service remains online. Restart each TUI individually to move the cluster to ${this.update.latestVersion}; restart the current leader last for the smallest interruption.`,
+      `更新已安装，未终止正在运行的 ${members} 个进程，现有 Apps/Actions 服务保持在线。请逐个重启 TUI 以切换到 ${this.update.latestVersion}，最后重启当前 leader 可将中断降到最低。`,
+    ));
+  }
+
 
   tickReminders(): void {
     this.currentRuntime.store.refreshTemporalStates();
@@ -249,18 +284,51 @@ export class TuiController {
 
   async editSettings(ask: Ask): Promise<void> {
     const config = this.currentRuntime.config;
-    const current = readLiteSettings() || { schemaVersion: 1 as const, workspaceDir: config.workspaceDir, host: config.host, port: config.port, connectorKey: config.connectorKey, actionsToken: config.actionsToken, publicBaseUrl: '', maxOutputChars: config.maxOutputChars, commandTimeoutSec: config.commandTimeoutSec, uiLanguage: config.uiLanguage, uiTheme: config.uiTheme };
+    const current = readLiteSettings() || { schemaVersion: 1 as const, workspaceDir: config.workspaceDir, host: config.host, port: config.port, connectorKey: config.connectorKey, actionsToken: config.actionsToken, publicBaseUrl: '', maxOutputChars: config.maxOutputChars, commandTimeoutSec: config.commandTimeoutSec, uiLanguage: config.uiLanguage, uiTheme: config.uiTheme, passiveLockEnabled: config.passiveLockEnabled };
+    const knownWorkspaces = readWorkspaceRegistry(path.dirname(settingsPath()));
+    const workspaceHint = workspaceChoiceHint(knownWorkspaces);
+    const passiveStatus = process.platform === 'darwin' ? passiveLockStatus(config) : { state: 'unsupported' };
+    const passiveFallback = !current.passiveLockEnabled
+      ? 'off'
+      : /armed|arming|visible_waiting_for_arm/.test(passiveStatus.state)
+        ? 'arm'
+        : 'standby';
     const answers = await ask([
-      { label: 'UI language zh-CN|en', fallback: current.uiLanguage }, { label: 'UI theme dark|light', fallback: current.uiTheme },
-      { label: this.text('Workspace directory', '工作区目录'), fallback: current.workspaceDir }, { label: this.text('Listen host', '监听地址'), fallback: current.host },
-      { label: this.text('Listen port', '监听端口'), fallback: String(current.port) }, { label: this.text('Public HTTPS URL (local clears)', '公网 HTTPS URL（local 清空）'), fallback: current.publicBaseUrl || 'local' },
-      { label: this.text('Maximum output characters', '最大输出字符'), fallback: String(current.maxOutputChars) }, { label: this.text('Command timeout seconds', '命令超时秒数'), fallback: String(current.commandTimeoutSec) },
+      { label: 'UI language zh-CN|en', fallback: current.uiLanguage, validate: (value) => ['zh-CN', 'en'].includes(value) ? undefined : 'Use zh-CN or en.' },
+      { label: 'UI theme dark|light', fallback: current.uiTheme, validate: (value) => ['dark', 'light'].includes(value) ? undefined : 'Use dark or light.' },
+      { label: `${this.text('Workspace path or number', '工作区路径或编号')}${workspaceHint ? ` · ${workspaceHint}` : ''}`, fallback: current.workspaceDir, validate: (value) => isDirectory(resolveWorkspaceInput(value, knownWorkspaces)) ? undefined : this.text('Workspace must be an accessible directory.', '工作区必须是可访问的目录。') },
+      { label: this.text('Listen host', '监听地址'), fallback: current.host, validate: (value) => value.trim() ? undefined : this.text('Host cannot be empty.', '监听地址不能为空。') },
+      { label: this.text('Listen port', '监听端口'), fallback: String(current.port), validate: (value) => { const port = Number(value); return Number.isInteger(port) && port >= 0 && port <= 65535 ? undefined : this.text('Port must be an integer from 0 to 65535.', '端口必须是 0 到 65535 的整数。'); } },
+      { label: this.text('Public HTTPS URL (local clears)', '公网 HTTPS URL（local 清空）'), fallback: current.publicBaseUrl || 'local', validate: (value) => value.toLowerCase() === 'local' || isValidPublicBaseUrl(value.replace(/\/$/, '')) ? undefined : this.text('Use HTTPS; localhost may use HTTP.', '请使用 HTTPS；localhost 可使用 HTTP。') },
+      { label: this.text('Maximum output characters', '最大输出字符'), fallback: String(current.maxOutputChars), validate: (value) => { const number = Number(value); return Number.isInteger(number) && number >= 4000 && number <= 1000000 ? undefined : this.text('Use an integer from 4000 to 1000000.', '请输入 4000 到 1000000 的整数。'); } },
+      { label: this.text('Command timeout seconds', '命令超时秒数'), fallback: String(current.commandTimeoutSec), validate: (value) => { const number = Number(value); return Number.isInteger(number) && number >= 1 && number <= 3600 ? undefined : this.text('Use an integer from 1 to 3600.', '请输入 1 到 3600 的整数。'); } },
+      { label: this.text('macOS passive lock off|arm|standby', 'macOS 被动锁屏 off|arm|standby'), fallback: passiveFallback, validate: (value) => ['off', 'arm', 'standby'].includes(value.toLowerCase()) ? undefined : this.text('Use off, arm, or standby.', '请输入 off、arm 或 standby。') },
     ]);
     if (!answers) return;
-    const next: LiteSettings = { ...current, uiLanguage: answers[0] as LiteSettings['uiLanguage'], uiTheme: answers[1] as LiteSettings['uiTheme'], workspaceDir: path.resolve(answers[2]), host: answers[3], port: integer(answers[4], current.port), publicBaseUrl: answers[5].toLowerCase() === 'local' ? '' : answers[5].replace(/\/$/, ''), maxOutputChars: integer(answers[6], current.maxOutputChars), commandTimeoutSec: integer(answers[7], current.commandTimeoutSec) };
-    const errors = validateSettings(next);
-    if (errors.length) { this.currentRuntime.log(errors.join(' '), 'error'); return; }
+    const passiveAction = answers[8].toLowerCase() as 'off' | 'arm' | 'standby';
+    if (process.platform !== 'darwin' && passiveAction !== 'off') {
+      this.currentRuntime.log(this.text('Passive lock is available only on macOS.', '被动锁屏目前仅支持 macOS。'), 'error');
+      return;
+    }
+    const next: LiteSettings = { ...current, uiLanguage: answers[0] as LiteSettings['uiLanguage'], uiTheme: answers[1] as LiteSettings['uiTheme'], workspaceDir: resolveWorkspaceInput(answers[2], knownWorkspaces), host: answers[3], port: integer(answers[4], current.port), publicBaseUrl: answers[5].toLowerCase() === 'local' ? '' : answers[5].replace(/\/$/, ''), maxOutputChars: integer(answers[6], current.maxOutputChars), commandTimeoutSec: integer(answers[7], current.commandTimeoutSec), passiveLockEnabled: passiveAction !== 'off' };
+    const errors = await validateSettingsFeasibility(next, { host: config.host, port: this.currentRuntime.port });
+    const conflict = errors.find((error) => error.includes('already in use'));
+    if (conflict) {
+      const decision = await ask([{ label: `${this.text('Port occupied by another program', '端口被其他程序占用')} · ${describePortOwner(next.port)} · kill|next|cancel`, fallback: 'cancel', validate: (value) => ['kill', 'next', 'cancel'].includes(value.toLowerCase()) ? undefined : this.text('Use kill, next, or cancel.', '请输入 kill、next 或 cancel。') }]);
+      const policy = decision?.[0].toLowerCase() || 'cancel';
+      try {
+        if (policy === 'kill') await terminatePortOwner(next.port);
+        else if (policy === 'next') next.port = await findAvailablePort(next.host, next.port);
+        else { this.currentRuntime.log(conflict, 'error'); return; }
+      } catch (error) { this.currentRuntime.log(error instanceof Error ? error.message : String(error), 'error'); return; }
+    } else if (errors.length) { this.currentRuntime.log(errors.join(' '), 'error'); return; }
     await this.applySettings(next);
+    if (process.platform === 'darwin') {
+      if (passiveAction === 'off') commandPassiveLock(this.currentRuntime.config, 'stop');
+      else commandPassiveLock(this.currentRuntime.config, passiveAction);
+      const status = passiveLockStatus(this.currentRuntime.config);
+      this.currentRuntime.log(this.text(`Passive lock: ${status.state}`, `被动锁屏：${status.state}`));
+    }
   }
 
   async rotateCredentials(ask: Ask): Promise<void> {

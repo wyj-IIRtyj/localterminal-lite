@@ -68,13 +68,13 @@ export class ExtensionService {
         return { ok: true, data: {
           identityRequired: true,
           instructions: {
-            root: 'Call extension_call with tool=session_register and input={mode:"root",name:"..."}. Save the returned sessionId + sessionToken.',
-            inherit: 'Resume/claim existing unfinished or released work with session_inherit(sessionId,claimCode). It does not continue a completed session.',
+            root: 'First call extension_discover without identity. If it lists multiple workspaces, ask the user to choose one and pass its workspaceId to session_register(mode=root). Never choose a workspace silently. Save the returned sessionId + sessionToken.',
+            inherit: 'Claim handed-off/released/revoked unfinished work with session_inherit(sessionId,claimCode), or reclaim the same stale session after interruption with session_inherit(sessionId,sessionToken=<previous token>). It does not continue a completed session.',
             continue: 'Continue immutable completed work by creating session_register(mode=root,continuesSessionId), or a delegated same-level continuation.',
             handoff: 'Handoff a live session with session_release; give its one-time claimCode to the next controller, which then calls session_inherit.',
             next: 'After identity is established, pass identity={sessionId,sessionToken} on every Actions facade call. Apps may omit it only after a verified openai/session binding exists.',
           },
-          bootstrapTools: ['session_register(mode=root)', 'session_inherit(sessionId,claimCode)'],
+          bootstrapTools: ['extension_discover()', 'session_register(mode=root,workspaceId)', 'session_inherit(sessionId,claimCode)', 'session_inherit(sessionId,sessionToken=<previous token>)'],
         } };
       }
       this.store.touchControl(authenticated.id);

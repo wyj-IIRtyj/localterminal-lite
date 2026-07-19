@@ -148,6 +148,7 @@ export type LiteSettings = {
   commandTimeoutSec: number;
   uiLanguage: 'en' | 'zh-CN';
   uiTheme: 'dark' | 'light';
+  passiveLockEnabled: boolean;
 };
 
 export type LiteConfig = {
@@ -163,6 +164,7 @@ export type LiteConfig = {
   commandTimeoutSec: number;
   uiLanguage: 'en' | 'zh-CN';
   uiTheme: 'dark' | 'light';
+  passiveLockEnabled: boolean;
 };
 
 export type SessionHistoryEntry = { at: string; type: string; data: JsonObject };

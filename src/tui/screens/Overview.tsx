@@ -6,7 +6,7 @@ import { Heading, Line } from './shared.js';
 
 export function Overview({ runtime, state, theme, zh, reveal }: { runtime: LiteRuntime; state: StoredState; theme: Theme; zh: boolean; reveal: boolean }) {
   return (
-    <box flexDirection="column" width="100%" padding={1} gap={1}>
+    <box flexDirection="column" width="100%" padding={1} gap={0}>
       <Heading theme={theme}>{zh ? '服务' : 'Server'}</Heading>
       <Line color={theme.text}>{`${zh ? '监听' : 'Bind'}: ${runtime.config.host}:${runtime.port}`}</Line>
       <Line color={theme.text}>{`${zh ? '工作区' : 'Workspace'}: ${runtime.config.workspaceDir}`}</Line>

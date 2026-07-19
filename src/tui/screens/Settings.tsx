@@ -1,12 +1,13 @@
 import type { LiteRuntime } from '../../server.js';
 import { maskCredential } from '../../config.js';
 import type { Theme } from '../state.js';
+import type { UpdateStatus } from '../../update.js';
 import { Heading, Line } from './shared.js';
 
-export function Settings({ runtime, theme, zh, reveal }: { runtime: LiteRuntime; theme: Theme; zh: boolean; reveal: boolean }) {
+export function Settings({ runtime, theme, zh, reveal, update }: { runtime: LiteRuntime; theme: Theme; zh: boolean; reveal: boolean; update: UpdateStatus }) {
   const config = runtime.config;
   return (
-    <box flexDirection="column" width="100%" padding={1} gap={1}>
+    <box flexDirection="column" width="100%" padding={1} gap={0}>
       <Heading theme={theme}>{zh ? '运行设置' : 'Runtime settings'}</Heading>
       <Line color={theme.text}>{`${zh ? '界面语言' : 'Language'}: ${config.uiLanguage}`}</Line>
       <Line color={theme.text}>{`${zh ? '界面主题' : 'Theme'}: ${config.uiTheme}`}</Line>
@@ -16,6 +17,9 @@ export function Settings({ runtime, theme, zh, reveal }: { runtime: LiteRuntime;
       <Line color={theme.text}>{`${zh ? '公网 URL' : 'Public URL'}: ${config.publicBaseUrl}`}</Line>
       <Line color={theme.text}>{`${zh ? '最大输出' : 'Max output'}: ${config.maxOutputChars}`}</Line>
       <Line color={theme.text}>{`${zh ? '命令超时' : 'Timeout'}: ${config.commandTimeoutSec}s`}</Line>
+      <Line color={process.platform === 'darwin' ? theme.text : theme.muted}>{`${zh ? 'macOS 被动锁屏' : 'macOS passive lock'}: ${process.platform === 'darwin' ? (config.passiveLockEnabled ? runtime.passiveLockStatus().state : (zh ? '关闭' : 'off')) : (zh ? '仅支持 macOS' : 'macOS only')}`}</Line>
+      {process.platform === 'darwin' ? <Line color={theme.warn}>{zh ? '需要在 系统设置 → 隐私与安全性 → 无障碍 中，为启动 LocalTerminal Lite 的终端应用授予权限。' : 'Requires Accessibility permission for the terminal app that launched LocalTerminal Lite.'}</Line> : null}
+      <Line color={update.restartRequired || update.updateAvailable ? theme.warn : update.error ? theme.bad : theme.good}>{update.checking ? (zh ? '更新：检查中…' : 'Update: checking…') : update.restartRequired ? `${zh ? '更新已安装，等待逐个重启' : 'Update installed; restart members one by one'}${update.runningClusterVersions?.length ? ` · ${zh ? '运行版本' : 'running'}: ${update.runningClusterVersions.join(', ')}` : ''}` : update.updateAvailable ? `${zh ? '可更新' : 'Update available'}: ${update.currentVersion} → ${update.latestVersion} · U ${zh ? '一键更新' : 'install'}` : update.error ? `${zh ? '更新检查失败' : 'Update check failed'}: ${update.error}` : `${zh ? '版本' : 'Version'}: ${update.currentVersion} · ${zh ? '已是最新' : 'up to date'}`}</Line>
       <text> </text>
       <Heading theme={theme}>{zh ? '连接凭据' : 'Connection credentials'}</Heading>
       <Line color={theme.text}>{`Apps connector: ${reveal ? config.connectorKey : '••••••••'}`}</Line>

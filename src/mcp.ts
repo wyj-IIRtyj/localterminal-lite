@@ -9,6 +9,8 @@ import type { InvocationContext, JsonObject, ToolResponse } from './types.js';
 
 type LiveSession = { server: McpServer; transport: StreamableHTTPServerTransport };
 
+export type ExtensionFacade = Pick<ExtensionService, 'discover' | 'register' | 'call'>;
+
 const responseSchema = {
   ok: z.boolean(),
   data: z.record(z.string(), z.unknown()).optional(),
@@ -22,10 +24,12 @@ const extensionToolInput = z.object({
   name: z.string().optional(),
   role: z.string().optional(),
   session: z.string().optional(),
+  workspaceId: z.string().optional(),
   mode: z.enum(['root', 'delegate']).optional(),
   phase: z.enum(['pending', 'working', 'waiting', 'blocked', 'completed', 'cancelled']).optional(),
   note: z.string().optional(),
   sessionId: z.string().optional(),
+  sessionToken: z.string().optional(),
   claimCode: z.string().optional(),
   continuesSessionId: z.string().optional(),
   summary: z.string().optional(),
@@ -98,12 +102,12 @@ function contextFromCall(callContext: unknown): InvocationContext {
   };
 }
 
-export function createMcpServer(service: ExtensionService): McpServer {
+export function createMcpServer(service: ExtensionFacade): McpServer {
   const server = new McpServer({ name: 'localterminal-lite', version: '1.0.1' }, {
     instructions: [
       'LocalTerminal Lite sessions are auditable work contexts, not ChatGPT conversation IDs.',
-      'Before work, create a root with session_register(mode=root), or claim an unfinished/released session with session_inherit(sessionId, claimCode).',
-      'Do not use session_inherit to continue completed work: completed sessions are immutable; create session_register(mode=root, continuesSessionId) or delegate a same-level continuation.',
+      'Before new work, call extension_discover. If multiple workspaces are listed, ask the user to choose one; never choose silently. Then create a root with session_register(mode=root, workspaceId), claim handed-off unfinished work with session_inherit(sessionId, claimCode), or reclaim the same stale session after interruption with session_inherit(sessionId, sessionToken=<previous token>).',
+      'Never create a new root for the same unfinished task merely because the old identity became stale. Reclaim that stale session with the previous sessionToken. Do not use session_inherit to continue completed work: completed sessions are immutable; create session_register(mode=root, continuesSessionId) or delegate a same-level continuation.',
       'For controller handoff, call session_release to obtain a one-time claimCode, then let the next controller call session_inherit.',
       'Pass identity={sessionId,sessionToken} on authenticated calls and finish every work turn with session_checkpoint.',
       'message_list covers both sent and received messages; message_conversation returns a two-way thread. Recipients accept session name or ID.',
@@ -142,7 +146,7 @@ export function createMcpServer(service: ExtensionService): McpServer {
 export class LiteMcpTransport {
   private readonly sessions = new Map<string, LiveSession>();
 
-  constructor(private readonly service: ExtensionService) {}
+  constructor(private readonly service: ExtensionFacade) {}
 
   activeSessions(): number {
     return this.sessions.size;

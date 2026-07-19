@@ -8,6 +8,9 @@ import {
   settingsPath,
 } from './config.js';
 import { LiteRuntime } from './server.js';
+import { createInterface } from 'node:readline/promises';
+import path from 'node:path';
+import { describePortOwner, findAvailablePort, isWorkspaceRecordActive, readWorkspaceRegistry, resolveWorkspaceInput, terminatePortOwner, workspaceChoiceHint } from './instances.js';
 import type { RuntimeReconfigure } from './tui/state.js';
 import type { LiteSettings } from './types.js';
 
@@ -55,10 +58,66 @@ async function ensureSettings(headless: boolean, env: NodeJS.ProcessEnv): Promis
   saveLiteSettings(configured, env);
 }
 
-async function startRuntime(env: NodeJS.ProcessEnv): Promise<LiteRuntime> {
-  const runtime = new LiteRuntime(loadLiteConfig(env));
-  await runtime.start();
-  return runtime;
+
+async function chooseWorkspace(env: NodeJS.ProcessEnv): Promise<void> {
+  const current = readLiteSettings(env);
+  if (!current) return;
+  const records = readWorkspaceRegistry(path.dirname(settingsPath(env)));
+  const hint = workspaceChoiceHint(records);
+  const prompt = createInterface({ input: process.stdin, output: process.stdout });
+  const answer = (await prompt.question(
+    `Workspace / 工作区
+${hint || '(no saved workspaces)'}
+` +
+    `Enter path or number [default: ${current.workspaceDir}]: `,
+  )).trim();
+  let selected = answer ? resolveWorkspaceInput(answer, records) : current.workspaceDir;
+  const active = records.find((record) => path.resolve(record.workspaceDir) === path.resolve(selected) && isWorkspaceRecordActive(record));
+  if (active) {
+    const alternative = (await prompt.question(
+      `That workspace is already served by PID ${active.lastPid} on ${active.lastHost}:${active.lastPort}.
+` +
+      'Choose another path/number, or press Enter to cancel: ',
+    )).trim();
+    if (!alternative) { prompt.close(); throw new Error('Workspace selection cancelled because the selected workspace is already active.'); }
+    selected = resolveWorkspaceInput(alternative, records);
+  }
+  prompt.close();
+  saveLiteSettings({ ...current, workspaceDir: selected }, env);
+}
+
+async function startRuntime(env: NodeJS.ProcessEnv, interactive = false): Promise<LiteRuntime> {
+  for (;;) {
+    const runtime = new LiteRuntime(loadLiteConfig(env));
+    try {
+      await runtime.start();
+      return runtime;
+    } catch (error) {
+      const detail = error as Error & { code?: string; port?: number; host?: string };
+      if (!interactive || detail.code !== 'EADDRINUSE' || !detail.port) throw error;
+      const owner = describePortOwner(detail.port);
+      const prompt = createInterface({ input: process.stdin, output: process.stdout });
+      const answer = (await prompt.question(
+        `Port ${detail.port} is occupied by ${owner}.
+` +
+        '[k] terminate that process  [n] use next free port  [c] cancel: ',
+      )).trim().toLowerCase();
+      prompt.close();
+      if (answer === 'k' || answer === 'kill') {
+        await terminatePortOwner(detail.port);
+        continue;
+      }
+      if (answer === 'n' || answer === 'next') {
+        const current = readLiteSettings(env);
+        if (!current) throw error;
+        const port = await findAvailablePort(detail.host || current.host, detail.port);
+        saveLiteSettings({ ...current, port }, env);
+        console.log(`Using available port ${port}.`);
+        continue;
+      }
+      throw error;
+    }
+  }
 }
 
 async function main(): Promise<void> {
@@ -69,7 +128,8 @@ async function main(): Promise<void> {
   const headless = process.argv.includes('--headless') || !process.stdin.isTTY || !process.stdout.isTTY;
   const env = effectiveEnvironment(headless);
   await ensureSettings(headless, env);
-  let runtime = await startRuntime(env);
+  if (!headless) await chooseWorkspace(env);
+  let runtime = await startRuntime(env, !headless);
   if (!headless) {
     const { LiteTui } = await import('./tui/index.js');
     const reconfigure: RuntimeReconfigure = async (next: LiteSettings) => {
@@ -88,7 +148,9 @@ async function main(): Promise<void> {
       }
     };
     await new LiteTui(runtime, reconfigure).run();
-    return;
+    // OpenTUI and platform input monitors may retain handles after a clean shutdown.
+    // At this point runtime.close() and all session resource cleanup have completed.
+    process.exit(0);
   }
   console.log(JSON.stringify({
     status: 'ready',
@@ -105,8 +167,25 @@ async function main(): Promise<void> {
   process.once('SIGTERM', stop);
 }
 
+function fatalErrorReport(error: unknown): string {
+  if (!(error instanceof Error)) return `LocalTerminal Lite failed to start.\nReason: ${String(error)}`;
+  const detail = error as Error & { code?: string; host?: string; port?: number; syscall?: string };
+  const lines = [
+    'LocalTerminal Lite failed to start.',
+    `Reason: ${detail.message || error.name}`,
+  ];
+  if (detail.code) lines.push(`Code: ${detail.code}`);
+  if (detail.host !== undefined || detail.port !== undefined) lines.push(`Bind: ${detail.host ?? '?'}:${detail.port ?? '?'}`);
+  if (detail.syscall) lines.push(`Operation: ${detail.syscall}`);
+  if (error.cause instanceof Error && error.cause.message && error.cause.message !== detail.message) {
+    lines.push(`Cause: ${error.cause.message}`);
+  }
+  if (error.stack) lines.push('', 'Stack trace:', error.stack);
+  return lines.join('\n');
+}
+
 main().catch((error) => {
   if (error instanceof Error && error.message === 'Setup cancelled.') return;
-  console.error(error instanceof Error ? error.stack || error.message : String(error));
+  console.error(fatalErrorReport(error));
   process.exit(1);
 });
