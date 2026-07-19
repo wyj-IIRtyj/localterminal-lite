@@ -122,9 +122,9 @@ export function App({ controller, onExit }: { controller: TuiController; onExit:
 
   const createSessionAction = useCallback(() => runAction(() => controller.createSession(ask)), [runAction, controller, ask]);
   const sessionAction = useCallback(() => runAction(async () => {
-    const session = logicalSessionGroups(controller.runtime.store.listSessions())[selected[1] || 0]?.current;
-    if (!session) return;
-    const nextDetail = await controller.sessionAction(session, ask);
+    const group = logicalSessionGroups(controller.runtime.store.listSessions())[selected[1] || 0];
+    if (!group) return;
+    const nextDetail = await controller.sessionAction([...group.sessions, ...group.children], ask);
     if (nextDetail) setDetail(nextDetail);
   }), [runAction, controller, selected, ask]);
   const sendMessageAction = useCallback(() => runAction(() => controller.sendMessage(ask)), [runAction, controller, ask]);

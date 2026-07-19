@@ -210,12 +210,33 @@ export class TuiController {
     this.currentRuntime.log(`Created child ${answers[1]}; handoff copied.`);
   }
 
-  async sessionAction(session: LiteSession, ask: Ask): Promise<Detail | undefined> {
+  async sessionAction(candidates: LiteSession[], ask: Ask): Promise<Detail | undefined> {
+    if (!candidates.length) return;
+    let session = candidates[0];
+    if (candidates.length > 1) {
+      const targetAnswers = await ask([{
+        label: this.text('Session to operate on', '选择操作对象'),
+        fallback: session.id,
+        options: candidates.map((item) => item.id),
+        optionLabels: candidates.map((item) => [
+          `${item.parentSessionId ? this.text('Child', '子 session') : item.continuesSessionId ? this.text('Continuation', '续作记录') : this.text('Root', '根 session')} · ${item.name}`,
+          item.id,
+          `${item.role} · ${item.phase}/${item.presence}`,
+        ].join('\n')),
+        optionsLayout: 'column',
+      }], [this.text('Choose the exact session before selecting an action.', '先选择具体 session，再选择要执行的操作。')]);
+      if (!targetAnswers?.[0]) return;
+      const selected = candidates.find((item) => item.id === targetAnswers[0]);
+      if (!selected) return;
+      session = selected;
+    }
     const terminal = ['completed', 'cancelled'].includes(session.phase);
     const actions = terminal ? ['context', 'delete', 'continue'] : ['copy', 'revoke', 'cancel', 'context', 'delete'];
-    const answers = await ask([{ label: this.text('Action', '操作'), fallback: 'context', options: actions }], [
-      `${session.name}  ${session.phase}/${session.presence}`,
-      session.id,
+    const targetType = session.parentSessionId ? this.text('Child session', '子 session') : session.continuesSessionId ? this.text('Continuation record', '续作记录') : this.text('Root session', '根 session');
+    const answers = await ask([{ label: this.text('Action for selected session', '对所选 session 执行操作'), fallback: 'context', options: actions }], [
+      `${this.text('Target', '操作对象')}: ${targetType} · ${session.name}`,
+      `${this.text('ID', 'ID')}: ${session.id}`,
+      `${this.text('State', '状态')}: ${session.phase}/${session.presence}`,
       session.latestCheckpoint?.summary || this.text('No checkpoint summary.', '暂无 checkpoint 总结。'),
     ]);
     if (!answers) return;
@@ -244,7 +265,7 @@ export class TuiController {
       await this.rememberAndCopy(created.session.id, created.handoffPrompt);
       this.currentRuntime.log(`Created continuation ${continuation[0]}.`);
     } else if (action === 'context') {
-      const group = logicalSessionGroups(this.currentRuntime.store.listSessions()).find((item) => item.sessions.some((item) => item.id === session.id));
+      const group = logicalSessionGroups(this.currentRuntime.store.listSessions()).find((item) => item.sessions.some((record) => record.id === session.id) || item.children.some((child) => child.id === session.id));
       if (group) return { kind: 'session', id: group.id };
     }
   }

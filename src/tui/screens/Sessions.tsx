@@ -46,6 +46,7 @@ export function Sessions({ state, selected, theme, zh, onSelect }: { state: Stor
                 {child.latestCheckpoint?.summary || child.task?.objective ? <Line color={active ? theme.selectedText : theme.muted}>{`   ${child.latestCheckpoint?.summary || child.task?.objective}`}</Line> : null}
               </box>
             ))}
+            <Line color={active ? theme.selectedText : theme.muted}>{`├─ ${zh ? '操作' : 'action'}: ${zh ? '按 u 后选择具体根/续作/子 session' : 'press u, then choose the exact root/continuation/child session'}`}</Line>
             <Line color={active ? theme.selectedText : theme.muted}>{`└─ ${zh ? '总结' : 'summary'}: ${summary}`}</Line>
           </box>
         );

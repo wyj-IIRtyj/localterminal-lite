@@ -379,6 +379,21 @@ test('session resource cleanup refuses to kill a reused unrelated PID', async ()
   }
 });
 
+test('session action targeting explicitly includes child sessions', () => {
+  const app = fs.readFileSync(path.join(process.cwd(), 'src/tui/App.tsx'), 'utf8');
+  const state = fs.readFileSync(path.join(process.cwd(), 'src/tui/state.ts'), 'utf8');
+  const sessions = fs.readFileSync(path.join(process.cwd(), 'src/tui/screens/Sessions.tsx'), 'utf8');
+  assert.match(app, /sessionAction\(\[\.\.\.group\.sessions, \.\.\.group\.children\], ask\)/);
+  assert.match(state, /Session to operate on/);
+  assert.match(state, /选择操作对象/);
+  assert.match(state, /item\.parentSessionId/);
+  assert.match(state, /optionsLayout: 'column'/);
+  assert.match(state, /Target/);
+  assert.match(state, /操作对象/);
+  assert.match(state, /item\.children\.some\(\(child\) => child\.id === session\.id\)/);
+  assert.match(sessions, /按 u 后选择具体根\/续作\/子 session/);
+});
+
 test('startup usability gates keep workspace options scrollable and cancellation non-fatal', () => {
   const formDialog = fs.readFileSync(path.join(process.cwd(), 'src/tui/components/FormDialog.tsx'), 'utf8');
   const tuiIndex = fs.readFileSync(path.join(process.cwd(), 'src/tui/index.tsx'), 'utf8');
