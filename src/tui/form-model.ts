@@ -44,7 +44,7 @@ export function workspaceOptionLabel(title: string, workspaceDir: string, status
 
 export function workspaceChoiceQuestion(
   label: string,
-  items: Array<{ title: string; workspaceDir: string; status: string }>,
+  items: Array<{ title: string; workspaceDir: string; status: string; active?: boolean }>,
   currentIndex = 0,
 ): FormQuestion {
   const options = items.map((_, index) => String(index + 1));
@@ -52,7 +52,12 @@ export function workspaceChoiceQuestion(
     label,
     fallback: options[Math.max(0, Math.min(currentIndex, options.length - 1))] || options[0],
     options,
-    optionLabels: items.map((item) => workspaceOptionLabel(item.title, item.workspaceDir, item.status)),
+    optionLabels: items.map((item) => item.title),
+    optionDescriptions: items.map((item) => item.workspaceDir),
+    optionBadges: items.map((item) => ({
+      label: item.status,
+      tone: item.active ? 'good' : 'muted',
+    })),
     optionsLayout: 'column',
   };
 }

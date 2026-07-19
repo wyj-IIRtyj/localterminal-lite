@@ -36,6 +36,7 @@ export function Setup({ defaults, onComplete, onCancel }: { defaults: LiteSettin
             title: item.label || path.basename(item.workspaceDir),
             workspaceDir: item.workspaceDir,
             status: isWorkspaceRecordActive(item) ? `active · ${item.lastHost || '127.0.0.1'}:${item.lastPort || '?'} · PID ${item.lastPid || '?'}` : 'inactive',
+            active: isWorkspaceRecordActive(item),
           })),
           currentWorkspaceIndex,
         )

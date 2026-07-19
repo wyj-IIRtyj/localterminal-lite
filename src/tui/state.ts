@@ -15,7 +15,7 @@ export type Tab = (typeof TABS)[number];
 export type Detail = { kind: 'session'; id: string } | { kind: 'conversation'; id: string };
 export type RuntimeReconfigureResult = { runtime: LiteRuntime; error?: string };
 export type RuntimeReconfigure = (settings: LiteSettings) => Promise<RuntimeReconfigureResult>;
-export type FormQuestion = { label: string | ((previous: string[]) => string); fallback?: string; multiline?: boolean; sensitive?: boolean; options?: string[]; optionLabels?: string[]; optionsLayout?: 'row' | 'column'; multiSelect?: boolean; validate?: (value: string, previous: string[]) => string | undefined | Promise<string | undefined> };
+export type FormQuestion = { label: string | ((previous: string[]) => string); fallback?: string; multiline?: boolean; sensitive?: boolean; options?: string[]; optionLabels?: string[]; optionDescriptions?: string[]; optionBadges?: Array<{ label: string; tone?: 'good' | 'warn' | 'muted' }>; optionsLayout?: 'row' | 'column'; multiSelect?: boolean; validate?: (value: string, previous: string[]) => string | undefined | Promise<string | undefined> };
 export type Ask = (questions: FormQuestion[], preamble?: string[]) => Promise<string[] | undefined>;
 
 export type Theme = {
@@ -352,6 +352,7 @@ export class TuiController {
             status: isWorkspaceRecordActive(item)
               ? this.text(`active · ${item.lastHost || '127.0.0.1'}:${item.lastPort || '?'} · PID ${item.lastPid || '?'}`, `运行中 · ${item.lastHost || '127.0.0.1'}:${item.lastPort || '?'} · PID ${item.lastPid || '?'}`)
               : this.text('inactive', '未运行'),
+            active: isWorkspaceRecordActive(item),
           })),
           currentWorkspaceIndex,
         ));

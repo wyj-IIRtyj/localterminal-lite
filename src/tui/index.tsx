@@ -65,6 +65,7 @@ export async function runWorkspaceChooserTui(records: WorkspaceRecord[], current
       status: isWorkspaceRecordActive(item)
         ? `${zh ? '运行中' : 'active'} · ${item.lastHost || '127.0.0.1'}:${item.lastPort || '?'} · PID ${item.lastPid || '?'}`
         : (zh ? '未运行' : 'inactive'),
+      active: isWorkspaceRecordActive(item),
     })),
     currentIndex,
   );

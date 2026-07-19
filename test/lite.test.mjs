@@ -426,13 +426,30 @@ test('form option state submits the latest multi-select values and resets betwee
   assert.equal(nextTextValue('3000', '3100', true), '3100');
   assert.equal(nextTextValue('3000', '30001', false), '30001');
   assert.equal(workspaceOptionLabel('LocalTerminal Lite', '/Users/example/localterminal-lite', 'active · 127.0.0.1:3000'), 'LocalTerminal Lite\n/Users/example/localterminal-lite\nactive · 127.0.0.1:3000');
-  const manyWorkspaces = Array.from({ length: 40 }, (_, index) => ({ title: `Workspace ${index + 1}`, workspaceDir: `/tmp/workspace-${index + 1}`, status: index === 17 ? 'active · 127.0.0.1:3017' : 'inactive' }));
+  const manyWorkspaces = Array.from({ length: 40 }, (_, index) => ({ title: `Workspace ${index + 1}`, workspaceDir: `/tmp/workspace-${index + 1}`, status: index === 17 ? 'active · 127.0.0.1:3017' : 'inactive', active: index === 17 }));
   const workspaceQuestion = workspaceChoiceQuestion('Workspace', manyWorkspaces, 17);
   assert.equal(workspaceQuestion.optionsLayout, 'column');
   assert.equal(workspaceQuestion.options.length, 40);
   assert.equal(workspaceQuestion.optionLabels.length, 40);
   assert.equal(workspaceQuestion.fallback, '18');
-  assert.equal(workspaceQuestion.optionLabels[17], 'Workspace 18\n/tmp/workspace-18\nactive · 127.0.0.1:3017');
+  assert.equal(workspaceQuestion.optionLabels[17], 'Workspace 18');
+  assert.equal(workspaceQuestion.optionDescriptions[17], '/tmp/workspace-18');
+  assert.deepEqual(workspaceQuestion.optionBadges[17], { label: 'active · 127.0.0.1:3017', tone: 'good' });
+  assert.deepEqual(workspaceQuestion.optionBadges[0], { label: 'inactive', tone: 'muted' });
+});
+
+test('workspace cards render status as an independent badge and require explicit mouse confirmation', () => {
+  const formDialog = fs.readFileSync(path.join(process.cwd(), 'src/tui/components/FormDialog.tsx'), 'utf8');
+  const model = fs.readFileSync(path.join(process.cwd(), 'src/tui/form-model.ts'), 'utf8');
+  assert.match(model, /optionDescriptions:/);
+  assert.match(model, /optionBadges:/);
+  assert.doesNotMatch(model, /optionLabels: items\.map\(\(item\) => workspaceOptionLabel/);
+  assert.match(formDialog, /mouseArmedOptionRef/);
+  assert.match(formDialog, /const wasArmed = mouseArmedOptionRef\.current === position/);
+  assert.match(formDialog, /else if \(wasArmed\)/);
+  assert.match(formDialog, /first click selects, second click confirms/);
+  assert.match(formDialog, /badges\[position\]\.label/);
+  assert.match(formDialog, /descriptions\[position\]/);
 });
 
 test('runtime close disarms session helpers and stops the global passive-lock service', async () => {

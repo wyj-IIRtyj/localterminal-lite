@@ -30,9 +30,12 @@ export function FormDialog({ questions, preamble, theme, width, height, zh, onCo
   const inputRef = useRef<InputRenderable>(null);
   const textareaRef = useRef<TextareaRenderable>(null);
   const optionsScrollRef = useRef<ScrollBoxRenderable>(null);
+  const mouseArmedOptionRef = useRef<number | null>(null);
   const question = questions[index];
   const options = question?.options || [];
   const labels = question?.optionLabels || options;
+  const descriptions = question?.optionDescriptions || [];
+  const badges = question?.optionBadges || [];
 
   const applyQuestionState = (nextIndex: number) => {
     const state = initialQuestionState(questions[nextIndex]);
@@ -43,6 +46,7 @@ export function FormDialog({ questions, preamble, theme, width, height, zh, onCo
     setPristine(state.pristine);
     setOptionIndex(state.optionIndex);
     setSelectedOptions(state.selectedOptions);
+    mouseArmedOptionRef.current = null;
     setValidation(undefined);
   };
 
@@ -67,6 +71,7 @@ export function FormDialog({ questions, preamble, theme, width, height, zh, onCo
     if (!options.length) return;
     const next = (optionIndexRef.current + options.length + delta) % options.length;
     optionIndexRef.current = next;
+    mouseArmedOptionRef.current = null;
     setOptionIndex(next);
   };
 
@@ -133,15 +138,30 @@ export function FormDialog({ questions, preamble, theme, width, height, zh, onCo
                 const selected = question.multiSelect ? selectedOptions.includes(option) : active;
                 return (
                   <box id={`form-option-${index}-${position}`} key={option} flexDirection="column" width={columnOptions ? '100%' : undefined} paddingLeft={1} paddingRight={1} backgroundColor={active ? theme.selected : theme.panelAlt} onMouseDown={() => {
+                    const wasArmed = mouseArmedOptionRef.current === position;
                     optionIndexRef.current = position;
                     setOptionIndex(position);
                     if (question.multiSelect) {
                       const next = toggleSelectedOption(selectedOptionsRef.current, option);
                       selectedOptionsRef.current = next;
                       setSelectedOptions(next);
-                    } else void submit(option);
+                      mouseArmedOptionRef.current = null;
+                    } else if (wasArmed) {
+                      mouseArmedOptionRef.current = null;
+                      void submit(option);
+                    } else {
+                      mouseArmedOptionRef.current = position;
+                    }
                   }}>
-                    <text fg={active ? theme.selectedText : selected ? theme.good : theme.text} wrapMode="word">{question.multiSelect ? `${selected ? '✓' : '○'} ${labels[position] || option}` : labels[position] || option}</text>
+                    <box flexDirection="row" justifyContent="space-between" width="100%">
+                      <text fg={active ? theme.selectedText : selected ? theme.good : theme.text} wrapMode="word">{question.multiSelect ? `${selected ? '✓' : '○'} ${labels[position] || option}` : labels[position] || option}</text>
+                      {badges[position] ? (
+                        <box paddingLeft={1} paddingRight={1} backgroundColor={theme.panel}>
+                          <text fg={badges[position].tone === 'good' ? theme.good : badges[position].tone === 'warn' ? theme.warn : theme.muted}>{badges[position].label}</text>
+                        </box>
+                      ) : null}
+                    </box>
+                    {descriptions[position] ? <text fg={active ? theme.selectedText : theme.muted} wrapMode="word">{descriptions[position]}</text> : null}
                   </box>
                 );
               })}
@@ -189,7 +209,7 @@ export function FormDialog({ questions, preamble, theme, width, height, zh, onCo
           {validation ? <text fg={theme.bad} wrapMode="word">{validation}</text> : null}
           {validating ? <text fg={theme.warn}>{zh ? '正在校验…' : 'Validating…'}</text> : null}
           <text fg={theme.muted}>{question.options
-            ? (question.multiSelect ? (zh ? '方向键选择 · Space 勾选 · Enter 确认 · 鼠标点击切换' : 'Arrows choose · Space toggle · Enter confirm · click to toggle') : (zh ? '方向键选择 · Enter 确认 · 鼠标点击' : 'Arrows choose · Enter confirm · click'))
+            ? (question.multiSelect ? (zh ? '方向键选择 · Space 勾选 · Enter 确认 · 鼠标点击切换' : 'Arrows choose · Space toggle · Enter confirm · click to toggle') : (zh ? '方向键选择 · Enter 确认 · 鼠标第一次选中、第二次确认' : 'Arrows choose · Enter confirm · first click selects, second click confirms'))
             : question.multiline
               ? (zh ? 'Ctrl+Enter 下一步 · Ctrl+U 清空 · Esc 取消' : 'Ctrl+Enter next · Ctrl+U clear · Esc cancel')
               : (zh ? 'Enter 下一步 · Ctrl+U 清空 · Esc 取消' : 'Enter next · Ctrl+U clear · Esc cancel')}</text>
