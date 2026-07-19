@@ -447,10 +447,10 @@ test('Actions identity, delegation, messages, ACK, completion audit, and continu
     const secondClaim = await call(server, 'session_inherit', { sessionId: childInfo.session.id, claimCode: childInfo.claimCode });
     assert.equal(secondClaim.body.error.code, 'SESSION_ALREADY_CLAIMED');
     const sent = await call(server, 'message_send', { to: main.session.id, body: 'Child progress is ready.' }, childIdentity);
-    assert.equal(sent.body.ok, true);
+    assert.equal(sent.body.ok, true); assert.equal(sent.body.data.result.message.source, 'session'); assert.ok(sent.body.data.result.timing.sentAt); assert.ok(sent.body.data.result.timing.returnedAt); assert.ok(sent.body.data.result.timing.elapsedMs >= 0);
     const reply = await call(server, 'message_send', { to: 'worker', body: 'Root acknowledges the update.' }, mainIdentity); assert.equal(reply.body.ok, true);
-    const messageList = await call(server, 'message_list', {}, childIdentity); assert.deepEqual(messageList.body.data.result.messages.map((message) => message.body), ['Child progress is ready.', 'Root acknowledges the update.']);
-    const conversation = await call(server, 'message_conversation', { with: 'main' }, childIdentity); assert.equal(conversation.body.data.result.conversation.messages.length, 2);
+    const messageList = await call(server, 'message_list', {}, childIdentity); assert.deepEqual(messageList.body.data.result.messages.map((message) => message.body), ['Child progress is ready.', 'Root acknowledges the update.']); assert.equal(messageList.body.data.result.observations.length, 2); assert.ok(messageList.body.data.result.observations.every((item) => item.observedAt && item.ageMs >= 0 && Array.isArray(item.operationsSinceSend)));
+    const conversation = await call(server, 'message_conversation', { with: 'main' }, childIdentity); assert.equal(conversation.body.data.result.conversation.messages.length, 2); assert.equal(conversation.body.data.result.observations.length, 2);
     const rootContext1 = await call(server, 'session_context', {}, mainIdentity);
     const rootEvents = rootContext1.body.events; assert.ok(rootEvents.length <= 5); assert.ok(rootEvents.some((event) => event.kind === 'message'));
     const rootContext2 = await call(server, 'session_context', {}, mainIdentity);
@@ -460,8 +460,17 @@ test('Actions identity, delegation, messages, ACK, completion audit, and continu
     assert.equal((afterAck.body.events || []).some((event) => rootEvents.some((old) => old.id === event.id)), false);
     const premature = await call(server, 'session_checkpoint', { phase: 'completed', summary: 'Root thinks it is done.' }, mainIdentity);
     assert.equal(premature.body.error.code, 'CHILD_REVIEW_REQUIRED'); assert.equal(premature.body.error.details.children.length, 1);
+    assert.equal(premature.body.error.details.mustContinue, true); assert.equal(premature.body.error.details.userFacingFinalProhibited, true); assert.ok(premature.body.error.details.currentTime);
+    assert.equal(premature.body.error.details.rootSession.phase, 'working'); assert.match(premature.body.error.details.rootSession.latestCheckpoint.summary, /Completion blocked/);
+    assert.ok(Array.isArray(premature.body.error.details.children[0].recentOperations)); assert.ok(typeof premature.body.error.details.children[0].inactivityMs === 'number');
     const childDone = await call(server, 'session_checkpoint', { phase: 'completed', summary: 'Implemented and verified the delegated slice.', milestone: 'child-complete' }, childIdentity);
     assert.equal(childDone.body.data.result.session.phase, 'completed'); assert.equal(childDone.body.data.result.session.controller, undefined);
+    const stillNeedsReview = await call(server, 'session_checkpoint', { phase: 'completed', summary: 'Attempt before reading child results.' }, mainIdentity);
+    assert.equal(stillNeedsReview.body.error.code, 'CHILD_REVIEW_REQUIRED'); assert.ok(stillNeedsReview.body.error.details.children[0].unreadMessages.length > 0 || stillNeedsReview.body.error.details.children[0].pendingEvents.length > 0);
+    const reviewedInbox = await call(server, 'message_inbox', { markRead: true }, mainIdentity); assert.equal(reviewedInbox.body.ok, true);
+    const reviewContext = await call(server, 'session_context', {}, mainIdentity);
+    const childEvents = (reviewContext.body.events || []).filter((event) => event.sourceSessionId === childInfo.session.id);
+    if (childEvents.length) { const reviewAck = await call(server, 'session_events_ack', { eventIds: childEvents.map((event) => event.id) }, mainIdentity); assert.equal(reviewAck.body.ok, true); }
     const rootDone = await call(server, 'session_checkpoint', { phase: 'completed', summary: 'Reviewed all child work and completed the root objective.' }, mainIdentity);
     assert.equal(rootDone.body.data.result.session.phase, 'completed');
     const immutable = await call(server, 'session_checkpoint', { phase: 'working', summary: 'Reopen.' }, mainIdentity); assert.equal(immutable.body.error.code, 'INVALID_IDENTITY');
@@ -471,6 +480,18 @@ test('Actions identity, delegation, messages, ACK, completion audit, and continu
     const permanentHistory = await call(server, 'session_history', { limit: 500, includeAncestors: true }, continuation.identity);
     assert.ok(permanentHistory.body.data.result.history.entries.some((entry) => entry.sessionId === main.session.id && entry.type === 'checkpoint'));
   } finally { await server.close(); }
+});
+
+test('TUI user messages are attributed to the user and preserve timing observations', () => {
+  const dirs = tempWorkspace(); const store = new LiteStore(dirs.stateDir);
+  try {
+    const rootSession = store.registerRoot({ name: 'recipient' });
+    const userMessage = store.sendUserMessage(rootSession.session.id, 'Please continue with the review.');
+    assert.equal(userMessage.from, 'user'); assert.equal(userMessage.source, 'user'); assert.equal(userMessage.to, rootSession.session.id);
+    const observations = store.observeMessages([userMessage]);
+    assert.equal(observations.length, 1); assert.equal(observations[0].sentAt, userMessage.createdAt); assert.ok(observations[0].observedAt); assert.ok(observations[0].ageMs >= 0); assert.ok(Array.isArray(observations[0].operationsSinceSend));
+    const groups = conversationGroups(store.snapshot().messages); assert.equal(groups.length, 1); assert.ok(groups[0].sessionIds.includes('user'));
+  } finally { fs.rmSync(dirs.workspaceDir, { recursive: true, force: true }); }
 });
 
 test('TUI model collapses continuation records and groups two-way conversations with stable scrolling', () => {

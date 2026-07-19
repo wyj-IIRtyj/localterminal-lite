@@ -274,7 +274,7 @@ export function createBuiltinTools(config: LiteConfig, store: LiteStore): Map<st
     deliverables: { ...stringList, minItems: 1 }, acceptanceCriteria: { ...stringList, minItems: 1 }, constraints: { ...stringList, minItems: 1 },
   };
   add({
-    name: 'session_register', title: 'Register session', description: 'Create and claim a root session, or delegate one direct child from an authenticated root.',
+    name: 'session_register', title: 'Register session', description: 'Create and claim a root session, or delegate one direct child from an authenticated root. Delegate by domain and parallel workload with a complete role/task package; do not offload one large objective wholesale to a single child.',
     inputSchema: {
       type: 'object', properties: {
         mode: { type: 'string', enum: ['root', 'delegate'], default: 'root' }, name: { type: 'string', minLength: 1, maxLength: 80 }, role: { type: 'string', maxLength: 80 },
@@ -310,7 +310,7 @@ export function createBuiltinTools(config: LiteConfig, store: LiteStore): Map<st
     invoke: async (_input, context) => { actor(context); return { sessions: store.listSessions().map(publicSession) }; },
   });
   add({
-    name: 'session_checkpoint', title: 'Checkpoint session', description: 'Record the required end-of-turn summary and phase; completion is immutable.',
+    name: 'session_checkpoint', title: 'Checkpoint session', description: 'Record the required end-of-turn summary and phase. This must be the final LocalTerminal call of every work turn. Root completion is blocked until every direct child is terminal and all child messages/events are reviewed.',
     inputSchema: { type: 'object', properties: { phase: { type: 'string', enum: ['pending', 'working', 'waiting', 'blocked', 'completed', 'cancelled'] }, summary: { type: 'string', minLength: 1, maxLength: 4000 }, nextSteps: stringList, blockers: stringList, artifacts: stringList, milestone: { type: 'string', maxLength: 1000 }, tags: stringList }, required: ['phase', 'summary'], additionalProperties: false }, annotations: mutating,
     invoke: async (input, context) => {
       const current = actor(context);
@@ -355,24 +355,29 @@ export function createBuiltinTools(config: LiteConfig, store: LiteStore): Map<st
     invoke: async (input, context) => ({ acknowledged: store.acknowledgeEvents(actor(context).id, input.eventIds as string[]) }),
   });
   add({
-    name: 'message_send', title: 'Send session message', description: 'Send a durable message as the authenticated session to a recipient session name or ID; sender cannot be overridden.',
+    name: 'message_send', title: 'Send session message', description: 'Send a durable message as the authenticated session to a recipient session name or ID; sender cannot be overridden. The response includes send/return timestamps and call latency.',
     inputSchema: { type: 'object', properties: { to: { type: 'string', minLength: 1 }, body: { type: 'string', minLength: 1, maxLength: 20_000 } }, required: ['to', 'body'], additionalProperties: false }, annotations: mutating,
-    invoke: async (input, context) => ({ message: store.sendMessage(actor(context).id, asString(input.to, 'to'), asString(input.body, 'body')) }),
+    invoke: async (input, context) => {
+      const startedAt = new Date().toISOString();
+      const message = store.sendMessage(actor(context).id, asString(input.to, 'to'), asString(input.body, 'body'));
+      const returnedAt = new Date().toISOString();
+      return { message, timing: { sentAt: message.createdAt, returnedAt, elapsedMs: Math.max(0, Date.parse(returnedAt) - Date.parse(startedAt)) } };
+    },
   });
   add({
     name: 'message_inbox', title: 'Read session inbox', description: 'Read only the authenticated session’s durable inbox.',
     inputSchema: { type: 'object', properties: { markRead: { type: 'boolean', default: false } }, additionalProperties: false }, annotations: { ...readOnly, readOnlyHint: false },
-    invoke: async (input, context) => { const current = actor(context); return { session: publicSession(current), messages: store.inbox(current.id, input.markRead === true) }; },
+    invoke: async (input, context) => { const current = actor(context); const messages = store.inbox(current.id, input.markRead === true); return { session: publicSession(current), messages, observations: store.observeMessages(messages) }; },
   });
   add({
     name: 'message_list', title: 'List own collaboration messages', description: 'List recent inbound and outbound messages involving the authenticated session.',
     inputSchema: { type: 'object', properties: { limit: { type: 'integer', minimum: 1, maximum: 1000 } }, additionalProperties: false }, annotations: readOnly,
-    invoke: async (input, context) => { const current = actor(context); return { messages: store.messagesForSession(current.id, typeof input.limit === 'number' ? input.limit : 100) }; },
+    invoke: async (input, context) => { const current = actor(context); const messages = store.messagesForSession(current.id, typeof input.limit === 'number' ? input.limit : 100); return { messages, observations: store.observeMessages(messages) }; },
   });
   add({
     name: 'message_conversation', title: 'Read two-way conversation', description: 'Read the complete recent two-way conversation between the authenticated session and another session selected by name or ID.',
     inputSchema: { type: 'object', properties: { with: { type: 'string', minLength: 1 }, limit: { type: 'integer', minimum: 1, maximum: 5000 } }, required: ['with'], additionalProperties: false }, annotations: readOnly,
-    invoke: async (input, context) => ({ conversation: store.conversation(actor(context).id, asString(input.with, 'with'), typeof input.limit === 'number' ? input.limit : 1000) }),
+    invoke: async (input, context) => { const conversation = store.conversation(actor(context).id, asString(input.with, 'with'), typeof input.limit === 'number' ? input.limit : 1000); return { conversation, observations: store.observeMessages(conversation.messages) }; },
   });
   return tools;
 }

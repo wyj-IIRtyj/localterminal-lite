@@ -20,8 +20,8 @@ export function FormDialog({ questions, preamble, theme, width, height, zh, onCo
   const [validation, setValidation] = useState<string>();
   const [validating, setValidating] = useState(false);
   const [pristine, setPristine] = useState(true);
-  const [optionIndex, setOptionIndex] = useState(0);
-  const [selectedOptions, setSelectedOptions] = useState<string[]>([]);
+  const [optionIndex, setOptionIndex] = useState(() => Math.max(0, questions[0]?.options?.indexOf(questions[0]?.fallback || '') ?? 0));
+  const [selectedOptions, setSelectedOptions] = useState<string[]>(() => questions[0]?.multiSelect && questions[0]?.fallback ? questions[0].fallback.split(',').map((item) => item.trim()).filter(Boolean) : []);
   const valueRef = useRef(value);
   const inputRef = useRef<InputRenderable>(null);
   const textareaRef = useRef<TextareaRenderable>(null);

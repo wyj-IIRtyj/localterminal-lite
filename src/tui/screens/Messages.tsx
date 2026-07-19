@@ -6,6 +6,7 @@ import { Heading, Line } from './shared.js';
 export function Messages({ state, selected, theme, zh, onSelect }: { state: StoredState; selected: number; theme: Theme; zh: boolean; onSelect: (index: number) => void }) {
   const groups = conversationGroups(state.messages);
   const names = new Map(state.sessions.map((session) => [session.id, session.name]));
+  names.set('user', zh ? '用户' : 'User');
   if (!groups.length) return <box padding={1}><Line color={theme.muted}>{zh ? '暂无对话，按 m 发送消息。' : 'No conversations. Press m to send a message.'}</Line></box>;
   return (
     <box flexDirection="column" width="100%" padding={1} gap={1}>
@@ -30,6 +31,7 @@ export function ConversationDetail({ state, id, theme, zh }: { state: StoredStat
   const group = conversationGroups(state.messages).find((item) => item.id === id);
   if (!group) return <box padding={1}><Line color={theme.bad}>{zh ? '对话已不存在，按 Esc 返回。' : 'Conversation no longer exists. Press Esc.'}</Line></box>;
   const names = new Map(state.sessions.map((session) => [session.id, session.name]));
+  names.set('user', zh ? '用户' : 'User');
   const [a, b] = group.sessionIds;
   return (
     <box flexDirection="column" width="100%" padding={1} gap={1}>

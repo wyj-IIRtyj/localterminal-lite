@@ -249,13 +249,14 @@ export class TuiController {
   }
 
   async sendMessage(ask: Ask): Promise<void> {
-    const sessions = this.currentRuntime.store.listSessions();
+    const sessions = this.currentRuntime.store.listSessions().filter((session) => !['completed', 'cancelled'].includes(session.phase));
+    const options = sessions.map((session) => session.id);
+    const labels = sessions.map((session) => `${session.name} · ${session.role} · ${session.phase}/${session.presence}`);
     const answers = await ask([
-      { label: this.text('From session name or ID', '发送方 session 名称或 ID'), fallback: sessions[0]?.name },
-      { label: this.text('To session name or ID', '接收方 session 名称或 ID'), fallback: sessions[1]?.name },
-      { label: this.text('Message', '消息'), multiline: true },
-    ]);
-    if (answers?.[0] && answers[1] && answers[2]) this.currentRuntime.store.sendMessage(answers[0], answers[1], answers[2]);
+      { label: this.text('Recipient session', '接收消息的 session'), fallback: options[0], options, optionLabels: labels },
+      { label: this.text('Message from user', '用户消息'), multiline: true },
+    ], [this.text('This message is recorded as sent by the user, not impersonating any session.', '该消息会记录为用户发送，不会冒充任何 session。')]);
+    if (answers?.[0] && answers[1]) this.currentRuntime.store.sendUserMessage(answers[0], answers[1]);
   }
 
   async addExtension(ask: Ask): Promise<void> {

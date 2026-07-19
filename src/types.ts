@@ -57,6 +57,7 @@ export type LiteMessage = {
   id: string;
   from: string;
   to: string;
+  source?: 'session' | 'user';
   body: string;
   createdAt: string;
   readAt?: string;

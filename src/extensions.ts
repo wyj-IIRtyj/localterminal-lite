@@ -91,9 +91,10 @@ export class ExtensionService {
           identity: 'Every concrete call and registry change belongs to the authenticated Lite session. Never use openai/session as Lite identity.',
           discover: 'Call extension_discover when you need the exact capability or input schema.',
           register: 'Call extension_register with action=validate before action=upsert.',
-          call: 'Call extension_call with exact tool name, identity, and input. End each work turn with session_checkpoint.',
-          collaboration: 'Roots delegate direct children with a structured task. Children claim via session_inherit, exchange messages, checkpoint, and complete.',
-          history: 'Continuation context is bounded by design. Use paginated session_history for permanent structured history. message_list includes sent and received messages; message_conversation returns one two-way thread. Session names or IDs are accepted for recipients.',
+          call: 'Call extension_call with exact tool name, identity, and input. Session state has highest priority: the final LocalTerminal call of every work turn must be session_checkpoint.',
+          collaboration: 'Delegate by domain and parallel workload rather than assigning an entire large objective to one child. Sessions must keep working until their acceptance criteria are complete, explicitly blocked, or waiting on external input. Collaboration is active, not one-way supervision: safely complete non-conflicting work and hand results to the responsible session. Before completion, coordinate via message_send and checkpoints; do not emit a completion-style user report.',
+          completion: 'A root cannot complete until every direct child is terminal and all child messages/events are reviewed. CHILD_REVIEW_REQUIRED returns current time, child status, recent operations, message timing, and mustContinue=true; continue work and do not end with a user-facing final summary.',
+          history: 'Continuation context is bounded by design. Use paginated session_history for permanent structured history. Message responses include sent/observed timestamps, age, audited operations since send, and possible delay notices.',
         },
         registrationSchema: {
           name: 'lower_snake_case, 3-64 characters', title: 'human-readable title', description: 'when to use the tool and what it changes',

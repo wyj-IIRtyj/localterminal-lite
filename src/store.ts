@@ -220,15 +220,58 @@ export class LiteStore {
     const summary = nonEmpty(input.summary, 'summary', 4000);
     if (TERMINAL_PHASES.has(session.phase)) throw new LiteError('SESSION_TERMINAL', 'Terminal sessions are immutable.');
     if (phase === 'completed' && !session.parentSessionId) {
-      const unfinished = this.state.sessions.filter((item) => item.parentSessionId === session.id && !TERMINAL_PHASES.has(item.phase));
-      if (unfinished.length) {
-        throw new LiteError('CHILD_REVIEW_REQUIRED', 'Review and close all direct child sessions before completing the root.', {
-          children: unfinished.map((child) => ({
-            session: publicSession(child), latestCheckpoint: child.latestCheckpoint,
-            unreadMessages: this.state.messages.filter((message) => message.from === child.id && message.to === session.id && !message.readAt),
-            pendingEvents: this.state.events.filter((event) => event.recipientSessionId === session.id && event.sourceSessionId === child.id && !event.acknowledgedAt),
-          })),
-          guidance: 'Review child checkpoints and events, exchange messages if needed, then complete or cancel each child.',
+      const now = this.iso();
+      const directChildren = this.state.sessions.filter((item) => item.parentSessionId === session.id);
+      const reviews = directChildren.map((child) => {
+        const unreadMessages = this.state.messages.filter((message) => message.from === child.id && message.to === session.id && !message.readAt);
+        const pendingEvents = this.state.events.filter((event) => event.recipientSessionId === session.id && event.sourceSessionId === child.id && !event.acknowledgedAt);
+        const since = child.latestCheckpoint?.at || child.createdAt;
+        const recentOperations = this.readHistory(child.id)
+          .filter((entry) => entry.type === 'tool_audit' && Date.parse(entry.at) >= Date.parse(since))
+          .slice(-20)
+          .map((entry) => ({ at: entry.at, tool: entry.data.tool, ok: entry.data.ok, durationMs: entry.data.durationMs, errorCode: entry.data.errorCode }));
+        return {
+          session: publicSession(child),
+          latestCheckpoint: child.latestCheckpoint,
+          unreadMessages,
+          messageObservations: this.observeMessages(unreadMessages),
+          pendingEvents,
+          recentOperations,
+          lastActivityAt: child.controller?.lastActivityAt || child.updatedAt,
+          inactivityMs: Math.max(0, Date.parse(now) - Date.parse(child.controller?.lastActivityAt || child.updatedAt)),
+          requiresReview: !TERMINAL_PHASES.has(child.phase) || unreadMessages.length > 0 || pendingEvents.length > 0,
+        };
+      });
+      const blocking = reviews.filter((item) => item.requiresReview);
+      if (blocking.length) {
+        const reviewCheckpoint: SessionCheckpoint = {
+          at: now,
+          phase: 'working',
+          summary: `Completion blocked: ${blocking.length} direct child session(s) still require work or explicit review. Continue orchestration; do not send a final user-facing summary.`,
+          nextSteps: ['Inspect the child status and recentOperations returned in this error.', 'Read and respond to unread child messages.', 'Acknowledge pending child events.', 'Help with non-conflicting work directly or send concrete guidance.', 'Complete or cancel each child only after its acceptance criteria are resolved.', 'Retry root completion only after every direct child is terminal and reviewed.'],
+          blockers: [], artifacts: [], tags: ['child-review-required'],
+        };
+        session.phase = 'working';
+        session.latestCheckpoint = reviewCheckpoint;
+        session.updatedAt = now;
+        delete session.checkpointStartedAt;
+        delete session.checkpointReminderEmittedAt;
+        this.appendHistory(session.id, 'checkpoint', reviewCheckpoint as unknown as JsonObject);
+        this.appendHistory(session.id, 'completion_blocked', { at: now, children: blocking.map((item) => ({ sessionId: (item.session as JsonObject).id, requiresReview: item.requiresReview })) });
+        if (session.controller) session.controller.lastActivityAt = now;
+        this.save();
+        throw new LiteError('CHILD_REVIEW_REQUIRED', 'Root completion is blocked. Continue working and supervising; a user-facing completion summary is prohibited until every direct child is terminal and all child messages/events are reviewed.', {
+          currentTime: now,
+          rootSession: publicSession(session),
+          children: reviews,
+          mustContinue: true,
+          userFacingFinalProhibited: true,
+          guidance: [
+            'Do not end the turn with a completion-style user report.',
+            'Use message_send for coordination and session_checkpoint for durable progress updates.',
+            'Supervision is collaborative: when safe and non-conflicting, directly complete useful work and hand the result to the responsible child.',
+            'Delegate by domain and parallel workload; do not offload an entire large objective to one child.',
+          ],
         });
       }
     }
@@ -325,13 +368,44 @@ export class LiteStore {
     const recipient = this.requireSession(toId);
     if (TERMINAL_PHASES.has(sender.phase)) throw new LiteError('SESSION_TERMINAL', 'A terminal session cannot send new messages.');
     if (TERMINAL_PHASES.has(recipient.phase)) throw new LiteError('INVALID_STATE', 'The recipient session is terminal; continue it before sending more work.');
-    const message: LiteMessage = { id: `msg_${randomUUID()}`, from: sender.id, to: recipient.id, body: nonEmpty(body, 'body', 20_000), createdAt: this.iso() };
+    const message: LiteMessage = { id: `msg_${randomUUID()}`, from: sender.id, to: recipient.id, source: 'session', body: nonEmpty(body, 'body', 20_000), createdAt: this.iso() };
     this.state.messages.push(message);
     this.appendHistory(sender.id, 'message_sent', message as unknown as JsonObject);
     this.appendHistory(recipient.id, 'message_received', message as unknown as JsonObject);
     this.emitEvent(recipient.id, sender.id, 'message', { message });
     this.save();
     return structuredClone(message);
+  }
+
+  sendUserMessage(toId: string, body: string): LiteMessage {
+    const recipient = this.requireSession(toId);
+    if (TERMINAL_PHASES.has(recipient.phase)) throw new LiteError('INVALID_STATE', 'The recipient session is terminal; continue it before sending more work.');
+    const message: LiteMessage = { id: `msg_${randomUUID()}`, from: 'user', to: recipient.id, source: 'user', body: nonEmpty(body, 'body', 20_000), createdAt: this.iso() };
+    this.state.messages.push(message);
+    this.appendHistory(recipient.id, 'user_message_received', message as unknown as JsonObject);
+    this.emitEvent(recipient.id, 'user', 'message', { message, source: 'user' });
+    this.save();
+    return structuredClone(message);
+  }
+
+  observeMessages(messages: LiteMessage[]): JsonObject[] {
+    const observedAt = this.iso();
+    const observedMs = Date.parse(observedAt);
+    return messages.map((message) => {
+      const sentMs = Date.parse(message.createdAt);
+      const involved = new Set([message.from, message.to].filter((id) => id !== 'user'));
+      const operations = [...involved].flatMap((id) => this.readHistory(id)
+        .filter((entry) => entry.type === 'tool_audit' && Date.parse(entry.at) >= sentMs && Date.parse(entry.at) <= observedMs)
+        .map((entry) => ({ sessionId: id, at: entry.at, tool: entry.data.tool, ok: entry.data.ok, durationMs: entry.data.durationMs })));
+      return {
+        message,
+        sentAt: message.createdAt,
+        observedAt,
+        ageMs: Math.max(0, observedMs - sentMs),
+        operationsSinceSend: operations.sort((a, b) => a.at.localeCompare(b.at)),
+        latencyNotice: operations.length ? 'The recipient may have progressed after this message; review operationsSinceSend before acting.' : 'No audited tool activity was recorded after this message.',
+      };
+    });
   }
 
   inbox(sessionId: string, markRead = false): LiteMessage[] {
@@ -541,7 +615,9 @@ export class LiteStore {
   }
 
   private handoffPrompt(session: LiteSession, claimCode: string): string {
-    return `你来接手 LocalTerminal Lite session “${session.name}”。在调用任何工作工具前，请先调用 extensionCall：tool=session_inherit，input={"sessionId":"${session.id}","claimCode":"${claimCode}"}。接管后使用返回的 sessionId + sessionToken 作为后续所有调用的 identity。目标：${session.task?.objective || '继续此 session 的工作'}。结束本轮前必须调用 session_checkpoint 写入总结和状态。`;
+    const task = session.task;
+    const format = (items?: string[]) => items?.length ? items.map((item) => `- ${item}`).join('\n') : '- 未指定';
+    return `你来接手 LocalTerminal Lite session “${session.name}”。\n\n身份与领取：\n在调用任何工作工具前，先调用 extensionCall：tool=session_inherit，input={"sessionId":"${session.id}","claimCode":"${claimCode}"}。接管后使用返回的 sessionId + sessionToken 作为后续所有调用的 identity。\n\n角色：${session.role}\n目标：${task?.objective || '继续此 session 的工作'}\n背景：${task?.background || '无额外背景'}\n交付物：\n${format(task?.deliverables)}\n验收标准：\n${format(task?.acceptanceCriteria)}\n约束：\n${format(task?.constraints)}\n\n协作与状态要求：\n- 子 session 的目标是并行高效和专业分工，不是被动等待或只做单向监督。\n- 在不产生冲突且符合范围时，主动完成可帮助其他 session 的工作，并通过 message_send 交接可直接纳入的成果。\n- 持续工作直到自己的交付物和验收标准完成、明确阻塞，或必须等待外部输入；不要在一次消息往返后无故停下。\n- 未完成全部工作时，禁止向用户输出完成式或总结式最终回复；阶段性进展通过 message_send、事件确认和 session_checkpoint 记录。\n- session 状态更新优先级最高。结束任何工作轮次前的最后一个 LocalTerminal 调用必须是 session_checkpoint，准确写入 working/waiting/blocked/completed。\n- 只有完成并验证所有交付物后才能使用 completed。`;
   }
 
   private notifyProgress(session: LiteSession, kind: SessionEventKind, payload: JsonObject): void {
