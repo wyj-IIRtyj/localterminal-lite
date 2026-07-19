@@ -17,7 +17,7 @@ import { appendWorkspaceLog, findAvailablePort, readWorkspaceLogs, readWorkspace
 import { migrateWorkspaceState } from '../dist/migration.js';
 import { checkForUpdate, isNewerVersion } from '../dist/update.js';
 import { PortClusterRegistry, tokenHash } from '../dist/cluster.js';
-import { disarmAllSessionResources, disarmSessionResources } from '../dist/session-resources.js';
+import { disarmAllSessionResources, disarmSessionResources, passiveLockStatus } from '../dist/session-resources.js';
 
 const CONNECTOR_KEY = 'test-connector-key-1234567890';
 const ACTIONS_TOKEN = 'test-actions-token-12345678901234567890';
@@ -378,32 +378,37 @@ test('session resource cleanup refuses to kill a reused unrelated PID', async ()
   }
 });
 
-test('runtime close disarms every registered session helper', async () => {
+test('runtime close disarms session helpers but preserves the global passive-lock service', async () => {
   const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-resource-config-'));
   const workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-resource-workspace-'));
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-resource-state-'));
   const settingsPath = path.join(configDir, 'config.json');
-  const children = [
-    spawn(process.execPath, ['-e', "process.title='LocalTerminalLitePassiveLock'; setInterval(() => {}, 1000)"], { stdio: 'ignore' }),
+  const sessionChildren = [
     spawn(process.execPath, ['-e', "process.title='LocalTerminalLitePassiveLock'; setInterval(() => {}, 1000)"], { stdio: 'ignore' }),
     spawn(process.execPath, ['-e', "process.title='LocalTerminalLitePassiveLock'; setInterval(() => {}, 1000)"], { stdio: 'ignore' }),
   ];
+  const passiveChild = spawn(process.execPath, ['-e', "process.title='LocalTerminalLitePassiveLock'; setInterval(() => {}, 1000)"], { stdio: 'ignore' });
   const directory = path.join(stateDir, 'session-resources');
+  const passiveDirectory = path.join(configDir, 'passive-lock');
   fs.mkdirSync(directory, { recursive: true });
-  fs.writeFileSync(path.join(directory, 'ses_one.pid'), `${children[0].pid}
-`);
-  fs.writeFileSync(path.join(directory, 'ses_two.pid'), `${children[1].pid}
-`);
-  fs.writeFileSync(path.join(directory, 'passive-lock.pid'), `${children[2].pid}
-`);
-  const runtime = new LiteRuntime({ workspaceDir, stateDir, settingsPath, host: '127.0.0.1', port: 0, connectorKey: CONNECTOR_KEY, actionsToken: ACTIONS_TOKEN, publicBaseUrl: '', maxOutputChars: 20_000, commandTimeoutSec: 10, uiLanguage: 'zh-CN', uiTheme: 'dark', passiveLockEnabled: false });
+  fs.mkdirSync(passiveDirectory, { recursive: true });
+  fs.writeFileSync(path.join(directory, 'ses_one.pid'), `${sessionChildren[0].pid}\n`);
+  fs.writeFileSync(path.join(directory, 'ses_two.pid'), `${sessionChildren[1].pid}\n`);
+  fs.writeFileSync(path.join(passiveDirectory, 'passive-lock.pid'), `${passiveChild.pid}\n`);
+  fs.writeFileSync(path.join(passiveDirectory, 'passive-lock.log'), `${new Date().toISOString()} standby_requested\n`);
+  const runtimeConfig = { workspaceDir, stateDir, settingsPath, host: '127.0.0.1', port: 0, connectorKey: CONNECTOR_KEY, actionsToken: ACTIONS_TOKEN, publicBaseUrl: '', maxOutputChars: 20_000, commandTimeoutSec: 10, uiLanguage: 'zh-CN', uiTheme: 'dark', passiveLockEnabled: false };
+  const runtime = new LiteRuntime(runtimeConfig);
   try {
+    assert.equal(passiveLockStatus(runtimeConfig).pid, passiveChild.pid);
     await runtime.start();
     await runtime.close();
-    await Promise.all(children.map((child) => new Promise((resolve) => child.once('exit', resolve))));
+    await Promise.all(sessionChildren.map((child) => new Promise((resolve) => child.once('exit', resolve))));
     assert.equal(fs.readdirSync(directory).some((entry) => entry.endsWith('.pid')), false);
+    assert.doesNotThrow(() => process.kill(passiveChild.pid, 0));
+    assert.equal(passiveLockStatus(runtimeConfig).state, 'standby_requested');
   } finally {
-    for (const child of children) child.kill('SIGKILL');
+    for (const child of sessionChildren) child.kill('SIGKILL');
+    passiveChild.kill('SIGKILL');
     fs.rmSync(configDir, { recursive: true, force: true });
     fs.rmSync(workspaceDir, { recursive: true, force: true });
     fs.rmSync(stateDir, { recursive: true, force: true });

@@ -10,15 +10,27 @@ struct ControlFile: Codable {
 }
 
 final class ProtectionView: NSView {
+    let standby: Bool
+
+    init(frame frameRect: NSRect, standby: Bool) {
+        self.standby = standby
+        super.init(frame: frameRect)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        NSColor.black.withAlphaComponent(0.40).setFill()
-        dirtyRect.fill()
+        if !standby {
+            NSColor.black.withAlphaComponent(0.40).setFill()
+            dirtyRect.fill()
+        }
         let inset = bounds.insetBy(dx: 28, dy: 28)
         let border = NSBezierPath(roundedRect: inset, xRadius: 30, yRadius: 30)
         border.lineWidth = 6
-        NSColor.systemGreen.withAlphaComponent(0.90).setStroke()
+        (standby ? NSColor.systemYellow : NSColor.systemGreen).withAlphaComponent(0.90).setStroke()
         border.stroke()
+        guard !standby else { return }
         let panelWidth: CGFloat = min(660, bounds.width - 120)
         let panelRect = NSRect(x: bounds.midX - panelWidth / 2, y: bounds.midY - 90, width: panelWidth, height: 180)
         let panel = NSBezierPath(roundedRect: panelRect, xRadius: 24, yRadius: 24)
@@ -118,6 +130,7 @@ final class PassiveLockService: NSObject, NSApplicationDelegate, NSWindowDelegat
         armed = false
         state = "standby"
         cleanupProtection()
+        createStandbyWindows()
         writeStatus(reason)
     }
 
@@ -132,6 +145,7 @@ final class PassiveLockService: NSObject, NSApplicationDelegate, NSWindowDelegat
         if sendLockShortcut() { writeStatus("lock_shortcut_sent") } else { writeStatus("error:lock_shortcut_not_sent") }
         if persistent {
             state = "standby"
+            createStandbyWindows()
             writeStatus("standby_after_lock")
         } else {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { NSApp.terminate(nil) }
@@ -174,8 +188,8 @@ final class PassiveLockService: NSObject, NSApplicationDelegate, NSWindowDelegat
         for value in urls where NSWorkspace.shared.open(URL(string: value)!) { writeStatus("accessibility_settings_opened"); return }
     }
 
-    @objc private func permissionStandby() { permissionWindow?.orderOut(nil); permissionWindow = nil; state = "standby"; writeStatus("standby_waiting_permission") }
-    func windowWillClose(_ notification: Notification) { permissionWindow = nil; if state == "waiting_permission" { state = "standby"; writeStatus("standby_waiting_permission") } }
+    @objc private func permissionStandby() { permissionWindow?.orderOut(nil); permissionWindow = nil; enterStandby(reason: "standby_waiting_permission") }
+    func windowWillClose(_ notification: Notification) { permissionWindow = nil; if state == "waiting_permission" { enterStandby(reason: "standby_waiting_permission") } }
 
     private func createPowerAssertion() {
         let result = IOPMAssertionCreateWithName(kIOPMAssertionTypeNoDisplaySleep as CFString, IOPMAssertionLevel(kIOPMAssertionLevelOn), "LocalTerminal Lite passive lock protection" as CFString, &assertionID)
@@ -188,8 +202,23 @@ final class PassiveLockService: NSObject, NSApplicationDelegate, NSWindowDelegat
             window.level = .screenSaver; window.backgroundColor = .clear; window.isOpaque = false; window.hasShadow = false
             window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
             window.ignoresMouseEvents = false
-            window.contentView = ProtectionView(frame: screen.frame)
+            window.contentView = ProtectionView(frame: screen.frame, standby: false)
             window.makeKeyAndOrderFront(nil)
+            windows.append(window)
+        }
+    }
+
+    private func createStandbyWindows() {
+        for screen in NSScreen.screens {
+            let window = NSWindow(contentRect: screen.frame, styleMask: [.borderless], backing: .buffered, defer: false, screen: screen)
+            window.level = .floating
+            window.backgroundColor = .clear
+            window.isOpaque = false
+            window.hasShadow = false
+            window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+            window.ignoresMouseEvents = true
+            window.contentView = ProtectionView(frame: screen.frame, standby: true)
+            window.orderFrontRegardless()
             windows.append(window)
         }
     }

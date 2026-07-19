@@ -5,7 +5,7 @@ import { logicalSessionGroups } from '../tui-model.js';
 import type { LiteRuntime, RuntimeLog } from '../server.js';
 import type { CustomExtensionSpec, LiteSession, LiteSettings, SessionPhase, StoredState, TaskPackage } from '../types.js';
 import { isDirectory, isValidPublicBaseUrl, maskCredential, readLiteSettings, rotateLiteCredentials, settingsPath, validateSettingsFeasibility } from '../config.js';
-import { describePortOwner, findAvailablePort, readWorkspaceRegistry, resolveWorkspaceInput, terminatePortOwner, workspaceChoiceHint } from '../instances.js';
+import { describePortOwner, findAvailablePort, isWorkspaceRecordActive, readWorkspaceRegistry, resolveWorkspaceInput, terminatePortOwner } from '../instances.js';
 import { checkForUpdate, installUpdate, isSourceCheckout, type UpdateStatus } from '../update.js';
 import { commandPassiveLock, passiveLockStatus } from '../session-resources.js';
 
@@ -284,33 +284,77 @@ export class TuiController {
 
   async editSettings(ask: Ask): Promise<void> {
     const config = this.currentRuntime.config;
-    const current = readLiteSettings() || { schemaVersion: 1 as const, workspaceDir: config.workspaceDir, host: config.host, port: config.port, connectorKey: config.connectorKey, actionsToken: config.actionsToken, publicBaseUrl: '', maxOutputChars: config.maxOutputChars, commandTimeoutSec: config.commandTimeoutSec, uiLanguage: config.uiLanguage, uiTheme: config.uiTheme, passiveLockEnabled: config.passiveLockEnabled };
+    const persisted = readLiteSettings();
+    const current: LiteSettings = {
+      schemaVersion: 1,
+      workspaceDir: config.workspaceDir,
+      host: config.host,
+      port: config.port,
+      connectorKey: config.connectorKey,
+      actionsToken: config.actionsToken,
+      publicBaseUrl: config.publicBaseUrl,
+      maxOutputChars: config.maxOutputChars,
+      commandTimeoutSec: config.commandTimeoutSec,
+      uiLanguage: config.uiLanguage,
+      uiTheme: config.uiTheme,
+      passiveLockEnabled: persisted?.passiveLockEnabled ?? config.passiveLockEnabled,
+    };
     const knownWorkspaces = readWorkspaceRegistry(path.dirname(settingsPath()));
-    const workspaceHint = workspaceChoiceHint(knownWorkspaces);
     const passiveStatus = process.platform === 'darwin' ? passiveLockStatus(config) : { state: 'unsupported' };
     const passiveFallback = !current.passiveLockEnabled
       ? 'off'
       : /armed|arming|visible_waiting_for_arm/.test(passiveStatus.state)
         ? 'arm'
         : 'standby';
-    const answers = await ask([
-      { label: 'UI language zh-CN|en', fallback: current.uiLanguage, validate: (value) => ['zh-CN', 'en'].includes(value) ? undefined : 'Use zh-CN or en.' },
-      { label: 'UI theme dark|light', fallback: current.uiTheme, validate: (value) => ['dark', 'light'].includes(value) ? undefined : 'Use dark or light.' },
-      { label: `${this.text('Workspace path or number', '工作区路径或编号')}${workspaceHint ? ` · ${workspaceHint}` : ''}`, fallback: current.workspaceDir, validate: (value) => isDirectory(resolveWorkspaceInput(value, knownWorkspaces)) ? undefined : this.text('Workspace must be an accessible directory.', '工作区必须是可访问的目录。') },
-      { label: this.text('Listen host', '监听地址'), fallback: current.host, validate: (value) => value.trim() ? undefined : this.text('Host cannot be empty.', '监听地址不能为空。') },
-      { label: this.text('Listen port', '监听端口'), fallback: String(current.port), validate: (value) => { const port = Number(value); return Number.isInteger(port) && port >= 0 && port <= 65535 ? undefined : this.text('Port must be an integer from 0 to 65535.', '端口必须是 0 到 65535 的整数。'); } },
-      { label: this.text('Public HTTPS URL (local clears)', '公网 HTTPS URL（local 清空）'), fallback: current.publicBaseUrl || 'local', validate: (value) => value.toLowerCase() === 'local' || isValidPublicBaseUrl(value.replace(/\/$/, '')) ? undefined : this.text('Use HTTPS; localhost may use HTTP.', '请使用 HTTPS；localhost 可使用 HTTP。') },
-      { label: this.text('Maximum output characters', '最大输出字符'), fallback: String(current.maxOutputChars), validate: (value) => { const number = Number(value); return Number.isInteger(number) && number >= 4000 && number <= 1000000 ? undefined : this.text('Use an integer from 4000 to 1000000.', '请输入 4000 到 1000000 的整数。'); } },
-      { label: this.text('Command timeout seconds', '命令超时秒数'), fallback: String(current.commandTimeoutSec), validate: (value) => { const number = Number(value); return Number.isInteger(number) && number >= 1 && number <= 3600 ? undefined : this.text('Use an integer from 1 to 3600.', '请输入 1 到 3600 的整数。'); } },
-      { label: this.text('macOS passive lock off|arm|standby', 'macOS 被动锁屏 off|arm|standby'), fallback: passiveFallback, validate: (value) => ['off', 'arm', 'standby'].includes(value.toLowerCase()) ? undefined : this.text('Use off, arm, or standby.', '请输入 off、arm 或 standby。') },
+    const workspaceLines = knownWorkspaces.length
+      ? knownWorkspaces.map((item, index) => `${index + 1}. ${item.label || path.basename(item.workspaceDir)}\n   ${item.workspaceDir}\n   ${isWorkspaceRecordActive(item) ? this.text(`active · ${item.lastHost || '127.0.0.1'}:${item.lastPort || '?'}`, `运行中 · ${item.lastHost || '127.0.0.1'}:${item.lastPort || '?'}`) : this.text('inactive', '未运行')}`)
+      : [this.text('No registered workspaces.', '没有已登记的工作区。')];
+    const selection = await ask([{ label: this.text('Fields to edit (comma-separated)', '选择要修改的字段（逗号分隔）'), fallback: 'port', validate: (value) => {
+      const allowed = new Set(['language', 'theme', 'workspace', 'host', 'port', 'public-url', 'max-output', 'timeout', 'passive-lock']);
+      const fields = value.split(',').map((item) => item.trim().toLowerCase()).filter(Boolean);
+      return fields.length && fields.every((field) => allowed.has(field)) ? undefined : this.text('Use: language, theme, workspace, host, port, public-url, max-output, timeout, passive-lock', '可选：language、theme、workspace、host、port、public-url、max-output、timeout、passive-lock');
+    } }], [
+      this.text('Edit only the settings you choose.', '只修改你选择的设置；未选择的项目保持不变。'),
+      this.text('Available fields:', '可选字段：'),
+      'language, theme, workspace, host, port, public-url, max-output, timeout, passive-lock',
+      '',
+      this.text('Registered workspaces:', '已登记工作区：'),
+      ...workspaceLines,
     ]);
+    if (!selection?.[0]) return;
+    const fields = [...new Set(selection[0].split(',').map((item) => item.trim().toLowerCase()).filter(Boolean))];
+    const questions: FormQuestion[] = [];
+    for (const field of fields) {
+      if (field === 'language') questions.push({ label: 'UI language zh-CN|en', fallback: current.uiLanguage, validate: (value) => ['zh-CN', 'en'].includes(value) ? undefined : 'Use zh-CN or en.' });
+      else if (field === 'theme') questions.push({ label: 'UI theme dark|light', fallback: current.uiTheme, validate: (value) => ['dark', 'light'].includes(value) ? undefined : 'Use dark or light.' });
+      else if (field === 'workspace') questions.push({ label: this.text('Workspace path or number', '工作区路径或编号'), fallback: current.workspaceDir, validate: (value) => isDirectory(resolveWorkspaceInput(value, knownWorkspaces)) ? undefined : this.text('Workspace must be an accessible directory.', '工作区必须是可访问的目录。') });
+      else if (field === 'host') questions.push({ label: this.text('Listen host', '监听地址'), fallback: current.host, validate: (value) => value.trim() ? undefined : this.text('Host cannot be empty.', '监听地址不能为空。') });
+      else if (field === 'port') questions.push({ label: this.text('Listen port', '监听端口'), fallback: String(current.port), validate: (value) => { const port = Number(value); return Number.isInteger(port) && port >= 0 && port <= 65535 ? undefined : this.text('Port must be an integer from 0 to 65535.', '端口必须是 0 到 65535 的整数。'); } });
+      else if (field === 'public-url') questions.push({ label: this.text('Public HTTPS URL (local clears)', '公网 HTTPS URL（local 清空）'), fallback: current.publicBaseUrl || 'local', validate: (value) => value.toLowerCase() === 'local' || isValidPublicBaseUrl(value.replace(/\/$/, '')) ? undefined : this.text('Use HTTPS; localhost may use HTTP.', '请使用 HTTPS；localhost 可使用 HTTP。') });
+      else if (field === 'max-output') questions.push({ label: this.text('Maximum output characters', '最大输出字符'), fallback: String(current.maxOutputChars), validate: (value) => { const number = Number(value); return Number.isInteger(number) && number >= 4000 && number <= 1000000 ? undefined : this.text('Use an integer from 4000 to 1000000.', '请输入 4000 到 1000000 的整数。'); } });
+      else if (field === 'timeout') questions.push({ label: this.text('Command timeout seconds', '命令超时秒数'), fallback: String(current.commandTimeoutSec), validate: (value) => { const number = Number(value); return Number.isInteger(number) && number >= 1 && number <= 3600 ? undefined : this.text('Use an integer from 1 to 3600.', '请输入 1 到 3600 的整数。'); } });
+      else if (field === 'passive-lock') questions.push({ label: this.text('macOS passive lock off|arm|standby', 'macOS 被动锁屏 off|arm|standby'), fallback: passiveFallback, validate: (value) => ['off', 'arm', 'standby'].includes(value.toLowerCase()) ? undefined : this.text('Use off, arm, or standby.', '请输入 off、arm 或 standby。') });
+    }
+    const answers = await ask(questions, [this.text(`Editing: ${fields.join(', ')}`, `正在修改：${fields.join(', ')}`)]);
     if (!answers) return;
-    const passiveAction = answers[8].toLowerCase() as 'off' | 'arm' | 'standby';
-    if (process.platform !== 'darwin' && passiveAction !== 'off') {
+    const next: LiteSettings = { ...current };
+    let passiveAction: 'off' | 'arm' | 'standby' | undefined;
+    fields.forEach((field, index) => {
+      const value = answers[index];
+      if (field === 'language') next.uiLanguage = value as LiteSettings['uiLanguage'];
+      else if (field === 'theme') next.uiTheme = value as LiteSettings['uiTheme'];
+      else if (field === 'workspace') next.workspaceDir = resolveWorkspaceInput(value, knownWorkspaces);
+      else if (field === 'host') next.host = value;
+      else if (field === 'port') next.port = integer(value, current.port);
+      else if (field === 'public-url') next.publicBaseUrl = value.toLowerCase() === 'local' ? '' : value.replace(/\/$/, '');
+      else if (field === 'max-output') next.maxOutputChars = integer(value, current.maxOutputChars);
+      else if (field === 'timeout') next.commandTimeoutSec = integer(value, current.commandTimeoutSec);
+      else if (field === 'passive-lock') { passiveAction = value.toLowerCase() as 'off' | 'arm' | 'standby'; next.passiveLockEnabled = passiveAction !== 'off'; }
+    });
+    if (process.platform !== 'darwin' && passiveAction && passiveAction !== 'off') {
       this.currentRuntime.log(this.text('Passive lock is available only on macOS.', '被动锁屏目前仅支持 macOS。'), 'error');
       return;
     }
-    const next: LiteSettings = { ...current, uiLanguage: answers[0] as LiteSettings['uiLanguage'], uiTheme: answers[1] as LiteSettings['uiTheme'], workspaceDir: resolveWorkspaceInput(answers[2], knownWorkspaces), host: answers[3], port: integer(answers[4], current.port), publicBaseUrl: answers[5].toLowerCase() === 'local' ? '' : answers[5].replace(/\/$/, ''), maxOutputChars: integer(answers[6], current.maxOutputChars), commandTimeoutSec: integer(answers[7], current.commandTimeoutSec), passiveLockEnabled: passiveAction !== 'off' };
     const errors = await validateSettingsFeasibility(next, { host: config.host, port: this.currentRuntime.port });
     const conflict = errors.find((error) => error.includes('already in use'));
     if (conflict) {
@@ -323,9 +367,8 @@ export class TuiController {
       } catch (error) { this.currentRuntime.log(error instanceof Error ? error.message : String(error), 'error'); return; }
     } else if (errors.length) { this.currentRuntime.log(errors.join(' '), 'error'); return; }
     await this.applySettings(next);
-    if (process.platform === 'darwin') {
-      if (passiveAction === 'off') commandPassiveLock(this.currentRuntime.config, 'stop');
-      else commandPassiveLock(this.currentRuntime.config, passiveAction);
+    if (process.platform === 'darwin' && passiveAction) {
+      commandPassiveLock(this.currentRuntime.config, passiveAction === 'off' ? 'stop' : passiveAction);
       const status = passiveLockStatus(this.currentRuntime.config);
       this.currentRuntime.log(this.text(`Passive lock: ${status.state}`, `被动锁屏：${status.state}`));
     }

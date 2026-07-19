@@ -21,12 +21,18 @@ function resourceDir(config: LiteConfig): string {
   return directory;
 }
 
+function globalPassiveLockDir(config: LiteConfig): string {
+  const directory = path.join(path.dirname(config.settingsPath), 'passive-lock');
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  return directory;
+}
+
 function pidFile(config: LiteConfig, sessionId: string): string {
   return path.join(resourceDir(config), `${sessionId}.pid`);
 }
 
 function helperAppPath(config: LiteConfig): string {
-  return path.join(resourceDir(config), HELPER_APP_NAME);
+  return path.join(globalPassiveLockDir(config), HELPER_APP_NAME);
 }
 
 function helperPath(config: LiteConfig): string {
@@ -112,9 +118,9 @@ function compileHelper(config: LiteConfig): string {
   return output;
 }
 
-function passiveLockPidFile(config: LiteConfig): string { return path.join(resourceDir(config), PASSIVE_LOCK_PID); }
-function passiveLockControlFile(config: LiteConfig): string { return path.join(resourceDir(config), PASSIVE_LOCK_CONTROL); }
-function passiveLockLogFile(config: LiteConfig): string { return path.join(resourceDir(config), PASSIVE_LOCK_LOG); }
+function passiveLockPidFile(config: LiteConfig): string { return path.join(globalPassiveLockDir(config), PASSIVE_LOCK_PID); }
+function passiveLockControlFile(config: LiteConfig): string { return path.join(globalPassiveLockDir(config), PASSIVE_LOCK_CONTROL); }
+function passiveLockLogFile(config: LiteConfig): string { return path.join(globalPassiveLockDir(config), PASSIVE_LOCK_LOG); }
 
 function nextPassiveLockRevision(config: LiteConfig): number {
   try {
@@ -195,9 +201,7 @@ export function disarmSessionResources(config: LiteConfig, sessionId: string): {
 
 export function disarmAllSessionResources(config: LiteConfig): { disarmed: number; pids: number[] } {
   const directory = resourceDir(config);
-  const passive = passiveLockStatus(config);
-  if (passive.pid) { try { process.kill(passive.pid, 'SIGTERM'); } catch { /* already exited */ } rmSync(passiveLockPidFile(config), { force: true }); }
-  const pids: number[] = passive.pid ? [passive.pid] : [];
+  const pids: number[] = [];
   for (const entry of existsSync(directory) ? readdirSync(directory) : []) {
     if (!entry.endsWith('.pid')) continue;
     const sessionId = entry.slice(0, -4);

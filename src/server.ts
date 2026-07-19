@@ -134,8 +134,9 @@ export class LiteRuntime {
 
   private startConfiguredPassiveLock(): void {
     if (!this.config.passiveLockEnabled || process.platform !== 'darwin') return;
-    try { startPassiveLockService(this.config, 'standby'); }
-    catch (error) { this.log(error instanceof Error ? error.message : String(error), 'error'); }
+    try {
+      if (!passiveLockStatus(this.config).running) startPassiveLockService(this.config, 'standby');
+    } catch (error) { this.log(error instanceof Error ? error.message : String(error), 'error'); }
   }
 
   private async becomeStandaloneLeader(port: number): Promise<void> {
