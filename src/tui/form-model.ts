@@ -41,3 +41,18 @@ export function nextTextValue(current: string, incoming: string, pristine: boole
 export function workspaceOptionLabel(title: string, workspaceDir: string, status: string): string {
   return `${title}\n${workspaceDir}\n${status}`;
 }
+
+export function workspaceChoiceQuestion(
+  label: string,
+  items: Array<{ title: string; workspaceDir: string; status: string }>,
+  currentIndex = 0,
+): FormQuestion {
+  const options = items.map((_, index) => String(index + 1));
+  return {
+    label,
+    fallback: options[Math.max(0, Math.min(currentIndex, options.length - 1))] || options[0],
+    options,
+    optionLabels: items.map((item) => workspaceOptionLabel(item.title, item.workspaceDir, item.status)),
+    optionsLayout: 'column',
+  };
+}

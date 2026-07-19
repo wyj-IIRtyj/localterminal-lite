@@ -12,7 +12,7 @@ import { LiteStore, SESSION_TIMING } from '../dist/store.js';
 import { WorkspaceDiffTracker } from '../dist/diff.js';
 import { conversationGroups, logicalSessionGroups, selectedViewport } from '../dist/tui-model.js';
 import { phaseColor, presenceColor, themeFor } from '../dist/tui/state.js';
-import { initialQuestionState, nextTextValue, optionAnswer, toggleSelectedOption, workspaceOptionLabel } from '../dist/tui/form-model.js';
+import { initialQuestionState, nextTextValue, optionAnswer, toggleSelectedOption, workspaceChoiceQuestion, workspaceOptionLabel } from '../dist/tui/form-model.js';
 import { createDefaultSettings, loadLiteConfig, readLiteSettings, saveLiteSettings, settingsPath, validateSettingsFeasibility } from '../dist/config.js';
 import { appendWorkspaceLog, findAvailablePort, readWorkspaceLogs, readWorkspaceRegistry, resolveWorkspaceInput, workspaceChoiceHint, workspaceId } from '../dist/instances.js';
 import { migrateWorkspaceState } from '../dist/migration.js';
@@ -383,6 +383,7 @@ test('startup usability gates keep workspace options scrollable and cancellation
   const formDialog = fs.readFileSync(path.join(process.cwd(), 'src/tui/components/FormDialog.tsx'), 'utf8');
   const tuiIndex = fs.readFileSync(path.join(process.cwd(), 'src/tui/index.tsx'), 'utf8');
   const cli = fs.readFileSync(path.join(process.cwd(), 'src/cli.ts'), 'utf8');
+  const state = fs.readFileSync(path.join(process.cwd(), 'src/tui/state.ts'), 'utf8');
   assert.match(formDialog, /ScrollBoxRenderable/);
   assert.match(formDialog, /scrollChildIntoView/);
   assert.match(formDialog, /height=\{Math\.max\(3, Math\.min\(16, height - 10\)\)\}/);
@@ -392,6 +393,9 @@ test('startup usability gates keep workspace options scrollable and cancellation
   assert.match(cli, /if \(!headless && !\(await chooseWorkspace\(env\)\)\) return/);
   assert.match(cli, /throw new StartupCancelled\(\)/);
   assert.match(cli, /error instanceof StartupCancelled/);
+  assert.doesNotMatch(state, /Registered workspaces:/);
+  assert.doesNotMatch(state, /已登记工作区：/);
+  assert.match(state, /workspaceChoiceQuestion\(/);
 });
 
 test('form option state submits the latest multi-select values and resets between questions', () => {
@@ -407,6 +411,13 @@ test('form option state submits the latest multi-select values and resets betwee
   assert.equal(nextTextValue('3000', '3100', true), '3100');
   assert.equal(nextTextValue('3000', '30001', false), '30001');
   assert.equal(workspaceOptionLabel('LocalTerminal Lite', '/Users/example/localterminal-lite', 'active · 127.0.0.1:3000'), 'LocalTerminal Lite\n/Users/example/localterminal-lite\nactive · 127.0.0.1:3000');
+  const manyWorkspaces = Array.from({ length: 40 }, (_, index) => ({ title: `Workspace ${index + 1}`, workspaceDir: `/tmp/workspace-${index + 1}`, status: index === 17 ? 'active · 127.0.0.1:3017' : 'inactive' }));
+  const workspaceQuestion = workspaceChoiceQuestion('Workspace', manyWorkspaces, 17);
+  assert.equal(workspaceQuestion.optionsLayout, 'column');
+  assert.equal(workspaceQuestion.options.length, 40);
+  assert.equal(workspaceQuestion.optionLabels.length, 40);
+  assert.equal(workspaceQuestion.fallback, '18');
+  assert.equal(workspaceQuestion.optionLabels[17], 'Workspace 18\n/tmp/workspace-18\nactive · 127.0.0.1:3017');
 });
 
 test('runtime close disarms session helpers and stops the global passive-lock service', async () => {

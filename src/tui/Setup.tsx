@@ -6,7 +6,7 @@ import { describePortOwner, findAvailablePort, isWorkspaceRecordActive, readWork
 import type { LiteSettings } from '../types.js';
 import { themeFor, type FormQuestion } from './state.js';
 import { FormDialog } from './components/FormDialog.js';
-import { workspaceOptionLabel } from './form-model.js';
+import { workspaceChoiceQuestion } from './form-model.js';
 
 function integer(value: string, fallback: number): number {
   const parsed = Number.parseInt(value, 10);
@@ -23,12 +23,6 @@ export function Setup({ defaults, onComplete, onCancel }: { defaults: LiteSettin
   ]);
   const theme = themeFor(defaults.uiTheme);
   const knownWorkspaces = readWorkspaceRegistry(path.dirname(settingsPath()));
-  const workspaceOptions = knownWorkspaces.map((item, index) => String(index + 1));
-  const workspaceLabels = knownWorkspaces.map((item) => workspaceOptionLabel(
-    item.label || path.basename(item.workspaceDir),
-    item.workspaceDir,
-    isWorkspaceRecordActive(item) ? `active · ${item.lastHost || '127.0.0.1'}:${item.lastPort || '?'}` : 'inactive',
-  ));
   const currentWorkspaceIndex = knownWorkspaces.findIndex((item) => path.resolve(item.workspaceDir) === path.resolve(defaults.workspaceDir));
   const questions: FormQuestion[] = pendingConflict ? [
     { label: `端口被非 LocalTerminal 程序占用 / Port occupied · ${describePortOwner(pendingConflict.candidate.port)}`, fallback: 'cancel', options: ['kill', 'next', 'cancel'] },
@@ -36,7 +30,15 @@ export function Setup({ defaults, onComplete, onCancel }: { defaults: LiteSettin
     { label: '界面语言 / UI language', fallback: defaults.uiLanguage, options: ['zh-CN', 'en'] },
     { label: '界面主题 / UI theme', fallback: defaults.uiTheme, options: ['dark', 'light'] },
     knownWorkspaces.length
-      ? { label: '选择工作区 / Select workspace', fallback: workspaceOptions[Math.max(0, currentWorkspaceIndex)] || workspaceOptions[0], options: workspaceOptions, optionLabels: workspaceLabels, optionsLayout: 'column' }
+      ? workspaceChoiceQuestion(
+          '选择工作区 / Select workspace',
+          knownWorkspaces.map((item) => ({
+            title: item.label || path.basename(item.workspaceDir),
+            workspaceDir: item.workspaceDir,
+            status: isWorkspaceRecordActive(item) ? `active · ${item.lastHost || '127.0.0.1'}:${item.lastPort || '?'} · PID ${item.lastPid || '?'}` : 'inactive',
+          })),
+          currentWorkspaceIndex,
+        )
       : { label: '工作区路径 / Workspace path', fallback: defaults.workspaceDir, validate: (value) => { try { return path.resolve(value) ? undefined : 'Invalid workspace.'; } catch { return 'Invalid workspace.'; } } },
     { label: '监听地址 / Host', fallback: defaults.host },
     { label: '端口 / Port', fallback: String(defaults.port), validate: (value) => { const port = Number(value); return Number.isInteger(port) && port >= 0 && port <= 65535 ? undefined : 'Port must be 0-65535.'; } },

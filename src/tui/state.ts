@@ -8,6 +8,7 @@ import { isDirectory, isValidPublicBaseUrl, maskCredential, readLiteSettings, ro
 import { describePortOwner, findAvailablePort, isWorkspaceRecordActive, readWorkspaceRegistry, resolveWorkspaceInput, terminatePortOwner } from '../instances.js';
 import { checkForUpdate, installUpdate, isSourceCheckout, type UpdateStatus } from '../update.js';
 import { commandPassiveLock, passiveLockStatus } from '../session-resources.js';
+import { workspaceChoiceQuestion } from './form-model.js';
 
 export const TABS = ['Overview', 'Sessions', 'Messages', 'Diff', 'Extensions', 'Settings', 'Logs'] as const;
 export type Tab = (typeof TABS)[number];
@@ -308,17 +309,11 @@ export class TuiController {
       : /armed|arming|visible_waiting_for_arm/.test(passiveStatus.state)
         ? 'arm'
         : 'standby';
-    const workspaceLines = knownWorkspaces.length
-      ? knownWorkspaces.map((item, index) => `${index + 1}. ${item.label || path.basename(item.workspaceDir)}\n   ${item.workspaceDir}\n   ${isWorkspaceRecordActive(item) ? this.text(`active · ${item.lastHost || '127.0.0.1'}:${item.lastPort || '?'}`, `运行中 · ${item.lastHost || '127.0.0.1'}:${item.lastPort || '?'}`) : this.text('inactive', '未运行')}`)
-      : [this.text('No registered workspaces.', '没有已登记的工作区。')];
     const settingFields = ['language', 'theme', 'workspace', 'host', 'port', 'public-url', 'max-output', 'timeout', 'passive-lock'];
     const selection = await ask([{ label: this.text('Choose settings to edit', '选择要修改的设置'), options: settingFields, multiSelect: true }], [
       this.text('Edit only the settings you choose.', '只修改你选择的设置；未选择的项目保持不变。'),
       this.text('Available fields:', '可选字段：'),
       'language, theme, workspace, host, port, public-url, max-output, timeout, passive-lock',
-      '',
-      this.text('Registered workspaces:', '已登记工作区：'),
-      ...workspaceLines,
     ]);
     if (!selection?.[0]) return;
     const fields = [...new Set(selection[0].split(',').map((item) => item.trim().toLowerCase()).filter(Boolean))];
@@ -327,15 +322,18 @@ export class TuiController {
       if (field === 'language') questions.push({ label: 'UI language', fallback: current.uiLanguage, options: ['zh-CN', 'en'] });
       else if (field === 'theme') questions.push({ label: 'UI theme', fallback: current.uiTheme, options: ['dark', 'light'] });
       else if (field === 'workspace') {
-        const workspaceOptions = knownWorkspaces.map((_, workspaceIndex) => String(workspaceIndex + 1));
         const currentWorkspaceIndex = knownWorkspaces.findIndex((item) => path.resolve(item.workspaceDir) === path.resolve(current.workspaceDir));
-        if (knownWorkspaces.length) questions.push({
-          label: this.text('Workspace', '工作区'),
-          fallback: workspaceOptions[Math.max(0, currentWorkspaceIndex)] || workspaceOptions[0],
-          options: workspaceOptions,
-          optionLabels: knownWorkspaces.map((item) => `${item.label || path.basename(item.workspaceDir)}\n${item.workspaceDir}\n${isWorkspaceRecordActive(item) ? this.text(`active · ${item.lastHost || '127.0.0.1'}:${item.lastPort || '?'}`, `运行中 · ${item.lastHost || '127.0.0.1'}:${item.lastPort || '?'}`) : this.text('inactive', '未运行')}`),
-          optionsLayout: 'column',
-        });
+        if (knownWorkspaces.length) questions.push(workspaceChoiceQuestion(
+          this.text('Workspace', '工作区'),
+          knownWorkspaces.map((item) => ({
+            title: item.label || path.basename(item.workspaceDir),
+            workspaceDir: item.workspaceDir,
+            status: isWorkspaceRecordActive(item)
+              ? this.text(`active · ${item.lastHost || '127.0.0.1'}:${item.lastPort || '?'} · PID ${item.lastPid || '?'}`, `运行中 · ${item.lastHost || '127.0.0.1'}:${item.lastPort || '?'} · PID ${item.lastPid || '?'}`)
+              : this.text('inactive', '未运行'),
+          })),
+          currentWorkspaceIndex,
+        ));
         else questions.push({ label: this.text('Workspace path', '工作区路径'), fallback: current.workspaceDir, validate: (value) => isDirectory(value) ? undefined : this.text('Workspace must be an accessible directory.', '工作区必须是可访问的目录。') });
       }
       else if (field === 'host') questions.push({ label: this.text('Listen host', '监听地址'), fallback: current.host, validate: (value) => value.trim() ? undefined : this.text('Host cannot be empty.', '监听地址不能为空。') });

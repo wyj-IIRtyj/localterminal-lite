@@ -11,7 +11,7 @@ import { App } from './App.js';
 import { Setup } from './Setup.js';
 import { themeFor, TuiController, type FormQuestion, type RuntimeReconfigure } from './state.js';
 import { FormDialog } from './components/FormDialog.js';
-import { workspaceOptionLabel } from './form-model.js';
+import { workspaceChoiceQuestion } from './form-model.js';
 
 export type { RuntimeReconfigure, RuntimeReconfigureResult } from './state.js';
 
@@ -56,22 +56,18 @@ export async function runWorkspaceChooserTui(records: WorkspaceRecord[], current
   if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('Workspace selection requires an interactive terminal.');
   const renderer = await createRenderer();
   let root: Root | undefined;
-  const options = records.map((_, index) => String(index + 1));
   const currentIndex = records.findIndex((item) => path.resolve(item.workspaceDir) === path.resolve(currentWorkspaceDir));
-  const labels = records.map((item) => {
-    const title = item.label || path.basename(item.workspaceDir) || item.id;
-    const status = isWorkspaceRecordActive(item)
-      ? `${zh ? '运行中' : 'active'} · ${item.lastHost || '127.0.0.1'}:${item.lastPort || '?'} · PID ${item.lastPid || '?'}`
-      : (zh ? '未运行' : 'inactive');
-    return workspaceOptionLabel(title, item.workspaceDir, status);
-  });
-  const question: FormQuestion = {
-    label: zh ? '选择工作区' : 'Select workspace',
-    fallback: options[Math.max(0, currentIndex)] || options[0],
-    options,
-    optionLabels: labels,
-    optionsLayout: 'column',
-  };
+  const question = workspaceChoiceQuestion(
+    zh ? '选择工作区' : 'Select workspace',
+    records.map((item) => ({
+      title: item.label || path.basename(item.workspaceDir) || item.id,
+      workspaceDir: item.workspaceDir,
+      status: isWorkspaceRecordActive(item)
+        ? `${zh ? '运行中' : 'active'} · ${item.lastHost || '127.0.0.1'}:${item.lastPort || '?'} · PID ${item.lastPid || '?'}`
+        : (zh ? '未运行' : 'inactive'),
+    })),
+    currentIndex,
+  );
   try {
     return await new Promise<string | undefined>((resolve, reject) => {
       root = renderWithKeymap(renderer, createElement(FormDialog, {
