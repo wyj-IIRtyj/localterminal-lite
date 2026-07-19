@@ -211,7 +211,7 @@ https://random-words.trycloudflare.com/openapi.json
 | `spec must be an object` | `extensionRegister` 需要顶层 `spec:{...}`。创建 session 应使用 `extensionCall` + `tool:"session_register"`。 |
 | `input.name is required`、`input.to is required` 或 `input.body is required` | 把参数放入 `extensionCall.input`，例如 `{tool:"message_send", input:{to:"reviewer", body:"Ready"}, identity:{...}}`。 |
 | `IDENTITY_REQUIRED` | 创建 root 或领取交接 session，然后在每个认证调用中携带返回的 identity。 |
-| `INVALID_IDENTITY` | token 已被撤销、释放、完成或变 stale。通过 TUI 撤销/签发新 claim，再 inherit。 |
+| `INVALID_IDENTITY` | 若同一 ChatGPT 对话因中断变 stale，使用旧 sessionToken 调用 session_inherit 恢复原 session；若是 release/revoke/handoff，则从 TUI 获取新 claimCode。不要为同一未完成任务新建 root。 |
 | `CHECKPOINT_REQUIRED` | 先调用 `session_checkpoint`，再继续普通工作。 |
 | `CHILD_REVIEW_REQUIRED` | 检查返回的子项总结、消息和事件；完成或取消全部子项。 |
 | Schema URL 无法访问 | 确认 Lite 和隧道都在运行，然后在浏览器打开 `https://你的域名/health` 和 `/openapi.json`。 |

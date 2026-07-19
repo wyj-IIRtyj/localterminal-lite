@@ -15,11 +15,12 @@ ACTIONS 接口层
 
 身份
 - Lite session 是可审计的工作上下文，不是 ChatGPT 对话 ID。
-- 普通工作前，只能通过以下一种方式建立身份：
-  a) 新任务：extensionCall({tool:"session_register", input:{mode:"root", name:"...", role:"lead"}})。
-  b) 领取别人交接的未完成任务：extensionCall({tool:"session_inherit", input:{sessionId:"...", claimCode:"..."}})。
+- 开始新任务前，先在无 identity 的情况下调用 extensionDiscover。若返回多个 workspace，必须向用户展示名称/路径并让用户选择，绝不能静默代选。
+- 只能通过以下一种方式建立身份：
+  a) 新任务：extensionCall({tool:"session_register", input:{mode:"root", name:"...", role:"lead", workspaceId:"<用户选择的 id>"}})。只有 discover 明确返回单一 workspace 时才可省略 workspaceId。
+  b) 领取别人交接的未完成任务：extensionCall({tool:"session_inherit", input:{sessionId:"...", claimCode:"..."}})；若同一 ChatGPT 对话因超时/中断导致旧 identity 变 stale，则使用旧 sessionToken 调用 session_inherit({sessionId,sessionToken}) 恢复原 session。session 自身决定 workspace。
 - 保存返回的 sessionId 和 sessionToken，供当前 ChatGPT 对话使用。之后每次 extensionDiscover、extensionCall、extensionRegister 都在顶层携带 identity:{sessionId,sessionToken}。不要在自然语言回复中输出 token。
-- session_inherit 只领取 pending、stale、released 或 revoked 的未完成工作，不用于续作 completed session。
+- session_inherit 只用于未完成工作：handoff/released/revoked 使用一次性 claimCode；同一对话恢复 stale session 使用之前的 sessionToken。绝不能因为 identity stale 就为同一任务新建 root。它不用于续作 completed session。
 - 续作已完成工作时调用 session_register(mode="root", continuesSessionId="...")。
 - 转交当前控制权时先调用 session_release；下一位控制者用返回的一次性 claimCode 调用 session_inherit。
 - 身份缺失或失效时，不要猜测 token 或盲目重试；按正确的领取流程重新建立身份。

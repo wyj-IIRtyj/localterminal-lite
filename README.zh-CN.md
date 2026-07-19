@@ -86,7 +86,7 @@ Lite session 是工作上下文，不是 ChatGPT 对话 ID。
 
 - 新任务通过 `session_register(mode=root)` 创建并领取 root。
 - Root 可以用结构化任务包创建多个直接子 session；子 session 不得创建孙 session。
-- `session_inherit` 使用一次性 claim code 领取 pending、stale、released 或 revoked 的未完成工作。
+- `session_inherit` 使用一次性 claim code 领取 handoff/released/revoked 的未完成工作；同一 ChatGPT 对话因中断变 stale 时，可用之前的 sessionToken 重新领取原 session。
 - Completed 工作不可变。续作必须创建同级 `session_register(...continuesSessionId)`，不能调用 `session_inherit`。
 - 每轮工作都以结构化 `session_checkpoint` 结束。
 - 消息永久保存，发送者身份不可伪造；事件在显式 ACK 前会重复投递。
@@ -155,3 +155,22 @@ bun run start -- --headless
 项目使用 [Apache License 2.0](LICENSE)，允许个人和商业使用、修改及再分发，并提供明确的专利授权。第三方依赖保留各自协议。
 
 LocalTerminal Lite 是独立开源项目，与 OpenAI 或 Cloudflare 没有关联，也未获得其背书。ChatGPT、OpenAI 和 Cloudflare 名称仅用于说明互操作性。
+## 更新
+
+LocalTerminal Lite 会在 TUI 启动时检查 GitHub 最新发行版。设置页会显示当前版本和最新版本；有新版本时按 `U` 可一键安装。发行版会先安装依赖并执行类型检查，再原子替换现有安装；失败时自动回滚。Git 源码工作区不会被一键更新覆盖。
+
+工作区状态迁移采用可重复执行的增量合并：现有目标状态、旧全局状态、`state.migrated` 和工作区 `.localterminal-lite` 会按稳定 ID 合并，session 历史文件会去重并完整保留。
+## 共享端口与工作区路由
+
+多个 LocalTerminal Lite 进程可以在 Apps connector key 和 Actions token 相同的前提下共用同一个 `host:port`。每个进程仍保留独立的 workspace、状态、session、历史和日志。端口组会选出一个公共网络 leader，其余成员仅监听本机回环端口；leader 退出后，其他成员会自动接管公共端口。
+
+在共享端口下，`extension_discover` 会列出当前活动的 workspace ID。新建 root session 时必须在 `session_register` 的 input 中传入 `workspaceId`；后续请求按 Lite session identity 路由，Apps 也可继续使用已验证的 `openai/session` 绑定。同一个 workspace 不允许被两个进程同时运行。若端口由非 LocalTerminal 程序占用，仍进入 kill、换端口或取消的处理流程。不同端口形成相互独立的端口组，聚合日志也不会跨端口混合。
+### macOS 被动锁屏保护
+
+设置页提供仅限 macOS 的被动锁屏控制，支持 `arm`、`standby` 和 `off` 三种操作。选择 `arm` 后，程序会保持显示器唤醒、显示全屏保护遮罩，并在首次键盘或鼠标输入时发送系统 `Control–Command–Q` 锁屏快捷键。锁屏后 helper 不退出，而是进入 `standby`：释放防睡眠断言和输入监听，用户可以正常使用电脑；之后可再次选择 `arm`，或选择 `off` 彻底关闭 helper。LocalTerminal Lite 在按 `q` 退出或 runtime 关闭时也会终止 helper，不应留下子进程。
+
+该功能目前仅支持 macOS。它需要为启动 LocalTerminal Lite 的终端或宿主进程（例如 Terminal、iTerm2）授予“无障碍”权限；部分 macOS 版本也可能显示 `LocalTerminal Lite Passive Lock`。权限窗口和设置页会明确说明所需权限及授权对象。
+
+### 集群更新
+
+安装更新不会终止正在运行的 TUI 进程。现有 Apps/Actions 流量会继续由内存中的旧代码处理，workspace 状态仍保存在磁盘。请逐个重启成员以切换到已安装版本，并最后重启当前网络 leader，以减少端口接管时的短暂中断。不同应用版本只有在集群协议版本相同时才允许共存；协议不兼容会在加入前被拒绝，避免混合版本破坏状态或路由。占用端口的旧版非集群 LocalTerminal Lite 会被视为普通端口冲突，不能直接加入；测试时应使用其他端口，或先把旧进程重启到支持集群的版本。

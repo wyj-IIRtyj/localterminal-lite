@@ -211,7 +211,7 @@ Create/save the GPT as **Only me** first. OpenAI may ask users to approve Action
 | `spec must be an object` | `extensionRegister` needs top-level `spec:{...}`. Session creation belongs to `extensionCall` with `tool:"session_register"`. |
 | `input.name is required`, `input.to is required`, or `input.body is required` | Put concrete arguments inside `extensionCall.input`, for example `{tool:"message_send", input:{to:"reviewer", body:"Ready"}, identity:{...}}`. |
 | `IDENTITY_REQUIRED` | Create a root or inherit a handed-off session, then include the returned identity on every authenticated call. |
-| `INVALID_IDENTITY` | The token was revoked, released, completed, or made stale. Use the TUI to revoke/issue a fresh claim and inherit it. |
+| `INVALID_IDENTITY` | If the same conversation became stale after interruption, call session_inherit with the previous sessionToken to reclaim the original session. For release/revoke/handoff, obtain a fresh claimCode from the TUI. Do not create a new root for the same unfinished task. |
 | `CHECKPOINT_REQUIRED` | Call `session_checkpoint` before ordinary work continues. |
 | `CHILD_REVIEW_REQUIRED` | Review the returned child summaries/messages/events and finish or cancel every child. |
 | Schema URL cannot be reached | Verify Lite and the tunnel are both running, then open `https://YOUR-HOST/health` and `/openapi.json` in a browser. |

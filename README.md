@@ -86,7 +86,7 @@ A Lite session is a work context, not a ChatGPT conversation ID.
 
 - New work creates and claims a root with `session_register(mode=root)`.
 - Delegation creates multiple direct child sessions with structured task packages; children cannot create grandchildren.
-- `session_inherit` claims pending, stale, released, or revoked unfinished work with a one-time claim code.
+- `session_inherit` uses a one-time claim code for handed-off/released/revoked unfinished work; the same interrupted ChatGPT conversation may reclaim its stale session with the previous sessionToken.
 - Completed work is immutable. Continue it with a same-level `session_register(...continuesSessionId)`, never with `session_inherit`.
 - Every work turn ends with a structured `session_checkpoint`.
 - Messages are durable, sender identity cannot be forged, and event delivery repeats until explicitly acknowledged.
@@ -155,3 +155,22 @@ bun run start -- --headless
 Licensed under the [Apache License 2.0](LICENSE), which permits personal and commercial use, modification, and redistribution and includes an explicit patent grant. Third-party packages retain their own licenses.
 
 LocalTerminal Lite is an independent open-source project and is not affiliated with or endorsed by OpenAI or Cloudflare. ChatGPT, OpenAI, and Cloudflare names are used only to describe interoperability.
+## Updates
+
+LocalTerminal Lite checks the latest GitHub release when the TUI starts. The Settings tab shows the installed and latest versions; press `U` to install an available release. Release installations are replaced atomically after dependency installation and type checking, with rollback on failure. Git source checkouts are never overwritten by one-click update.
+
+Workspace state migration is additive and idempotent: existing target state, legacy global state, `state.migrated`, and the workspace `.localterminal-lite` directory are merged by stable IDs, while session history files are deduplicated and retained.
+## Shared ports and workspace routing
+
+Multiple LocalTerminal Lite processes may use the same `host:port` when they share the same Apps connector key and Actions token. Each process keeps its own workspace, state, sessions, history, and logs. One member is elected as the public network leader; the other members use private loopback listeners. If the leader exits, a remaining member automatically takes over the public port.
+
+On a shared port, `extension_discover` lists the active workspace IDs. A new root session must pass `workspaceId` in the `session_register` input. Later calls are routed by Lite session identity, and Apps calls may continue through their verified `openai/session` binding. The same workspace cannot be active in two processes. Unrelated programs occupying the port still trigger the normal kill/change/cancel flow. Different ports form independent groups and keep their aggregated logs separate.
+### macOS passive-lock protection
+
+The Settings page exposes a macOS-only passive-lock control with three actions: `arm`, `standby`, and `off`. `arm` keeps the display awake, shows a full-screen protection overlay, and sends the system `Control–Command–Q` shortcut on the first keyboard or mouse event. After locking, the helper remains alive in `standby`, releases its power assertion and input monitors, and lets the user operate the Mac normally. The user may later choose `arm` again or `off` to terminate the helper. LocalTerminal Lite also terminates the helper during `q` shutdown or runtime close, so no child process should remain.
+
+The feature currently supports macOS only. It requires Accessibility permission for the terminal or host process that launched LocalTerminal Lite (for example Terminal or iTerm2). Some macOS versions may also list `LocalTerminal Lite Passive Lock`. The permission dialog and Settings page state exactly which permission is required and where to grant it.
+
+### Cluster updates
+
+Installing an update never terminates running TUI processes. Existing Apps/Actions traffic continues on the currently loaded code, and workspace state remains on disk. Restart members one at a time to adopt the installed release; restart the current network leader last to minimize the brief handover window. Members with different application versions may coexist only when they use the same cluster protocol version. An incompatible protocol is rejected before the process joins, preventing mixed-version state or routing corruption. A pre-cluster release already occupying the port is treated as a normal port conflict and cannot be joined; use another port for testing or restart it on the cluster-capable release first.
