@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import net from 'node:net';
+import { execFileSync, spawn } from 'node:child_process';
 import { act, createElement } from 'react';
 import { testRender } from '@opentui/react/test-utils';
 import { LiteRuntime } from '../dist/server.js';
@@ -11,7 +12,12 @@ import { LiteStore, SESSION_TIMING } from '../dist/store.js';
 import { WorkspaceDiffTracker } from '../dist/diff.js';
 import { conversationGroups, logicalSessionGroups, selectedViewport } from '../dist/tui-model.js';
 import { phaseColor, presenceColor, themeFor } from '../dist/tui/state.js';
-import { createDefaultSettings, loadLiteConfig, readLiteSettings, saveLiteSettings, settingsPath } from '../dist/config.js';
+import { createDefaultSettings, loadLiteConfig, readLiteSettings, saveLiteSettings, settingsPath, validateSettingsFeasibility } from '../dist/config.js';
+import { appendWorkspaceLog, findAvailablePort, readWorkspaceLogs, readWorkspaceRegistry, resolveWorkspaceInput, workspaceChoiceHint, workspaceId } from '../dist/instances.js';
+import { migrateWorkspaceState } from '../dist/migration.js';
+import { checkForUpdate, isNewerVersion } from '../dist/update.js';
+import { PortClusterRegistry, tokenHash } from '../dist/cluster.js';
+import { disarmAllSessionResources, disarmSessionResources } from '../dist/session-resources.js';
 
 const CONNECTOR_KEY = 'test-connector-key-1234567890';
 const ACTIONS_TOKEN = 'test-actions-token-12345678901234567890';
@@ -30,6 +36,31 @@ async function createRuntime() {
   await runtime.start();
   return { runtime, dirs, baseUrl: `http://127.0.0.1:${runtime.port}`, async close() { await runtime.close(); fs.rmSync(dirs.workspaceDir, { recursive: true, force: true }); } };
 }
+
+test('startup errors preserve bind details and the original cause', async () => {
+  const blocker = net.createServer();
+  await new Promise((resolve, reject) => {
+    blocker.once('error', reject);
+    blocker.listen(0, '127.0.0.1', resolve);
+  });
+  const dirs = tempWorkspace();
+  const port = blocker.address().port;
+  const runtime = new LiteRuntime({ ...dirs, settingsPath: path.join(dirs.stateDir, 'test-settings.json'), host: '127.0.0.1', port, connectorKey: CONNECTOR_KEY, actionsToken: ACTIONS_TOKEN, publicBaseUrl: `http://127.0.0.1:${port}`, maxOutputChars: 20_000, commandTimeoutSec: 10, uiLanguage: 'zh-CN', uiTheme: 'dark' });
+  try {
+    await assert.rejects(runtime.start(), (error) => {
+      assert.equal(error.code, 'EADDRINUSE');
+      assert.equal(error.host, '127.0.0.1');
+      assert.equal(error.port, port);
+      assert.match(error.message, /Failed to start LocalTerminal Lite/);
+      assert.match(error.message, /EADDRINUSE/);
+      assert.ok(error.cause instanceof Error);
+      return true;
+    });
+  } finally {
+    blocker.close();
+    fs.rmSync(dirs.workspaceDir, { recursive: true, force: true });
+  }
+});
 
 function actionsHeaders() { return { authorization: `Bearer ${ACTIONS_TOKEN}`, 'content-type': 'application/json' }; }
 async function action(server, endpoint, body) {
@@ -90,9 +121,293 @@ test('TUI settings persist outside workspace and placeholder environment values 
     assert.deepEqual(readLiteSettings(env), { ...settings, workspaceDir: fs.realpathSync(workspaceDir) });
     const config = loadLiteConfig(env); assert.equal(config.workspaceDir, fs.realpathSync(workspaceDir)); assert.equal(config.publicBaseUrl, 'http://127.0.0.1:3210');
     assert.equal(settingsPath(env), path.join(configDir, 'config.json')); assert.equal(fs.existsSync(path.join(workspaceDir, '.localterminal-lite', 'config.json')), false);
-    const legacy = { ...settings }; delete legacy.uiLanguage; delete legacy.uiTheme; fs.writeFileSync(settingsPath(env), JSON.stringify(legacy));
-    assert.equal(readLiteSettings(env).uiLanguage, 'zh-CN'); assert.equal(readLiteSettings(env).uiTheme, 'dark');
+    const legacy = { ...settings }; delete legacy.uiLanguage; delete legacy.uiTheme; delete legacy.passiveLockEnabled; fs.writeFileSync(settingsPath(env), JSON.stringify(legacy));
+    assert.equal(readLiteSettings(env).uiLanguage, 'zh-CN'); assert.equal(readLiteSettings(env).uiTheme, 'dark'); assert.equal(readLiteSettings(env).passiveLockEnabled, false);
   } finally { fs.rmSync(workspaceDir, { recursive: true, force: true }); fs.rmSync(configDir, { recursive: true, force: true }); }
+});
+
+test('settings feasibility ignores a port owned by the current process and state survives outside a detached workspace', async () => {
+  const workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-detachable-workspace-'));
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-detachable-config-'));
+  const env = { ...process.env, LITE_CONFIG_DIR: configDir };
+  const blocker = await new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => resolve(server));
+  });
+  try {
+    const port = blocker.address().port;
+    const settings = { ...createDefaultSettings(workspaceDir), port };
+    const errors = await validateSettingsFeasibility(settings);
+    assert.equal(errors.some((error) => error.includes('already in use')), false);
+    saveLiteSettings({ ...settings, port: 0 }, env);
+    const config = loadLiteConfig(env);
+    assert.equal(config.stateDir.startsWith(configDir), true);
+    assert.equal(config.stateDir.startsWith(workspaceDir), false);
+    const store = new LiteStore(config.stateDir);
+    store.registerRoot({ name: 'survives-detach' });
+    fs.rmSync(workspaceDir, { recursive: true, force: true });
+    assert.equal(new LiteStore(config.stateDir).listSessions()[0].name, 'survives-detach');
+  } finally {
+    blocker.close();
+    fs.rmSync(workspaceDir, { recursive: true, force: true });
+    fs.rmSync(configDir, { recursive: true, force: true });
+  }
+});
+
+test('workspace profiles isolate state and aggregate local logs', async () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-workspace-registry-'));
+  const workspaceA = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-workspace-a-'));
+  const workspaceB = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-workspace-b-'));
+  const env = { ...process.env, LITE_CONFIG_DIR: configDir };
+  try {
+    saveLiteSettings({ ...createDefaultSettings(workspaceA), port: 0 }, env);
+    const configA = loadLiteConfig(env);
+    const storeA = new LiteStore(configA.stateDir);
+    storeA.registerRoot({ name: 'workspace-a-session' });
+    appendWorkspaceLog(configA.stateDir, { at: new Date().toISOString(), level: 'info', message: 'workspace A log' });
+
+    saveLiteSettings({ ...createDefaultSettings(workspaceB), port: 0 }, env);
+    const configB = loadLiteConfig(env);
+    const storeB = new LiteStore(configB.stateDir);
+    storeB.registerRoot({ name: 'workspace-b-session' });
+    appendWorkspaceLog(configB.stateDir, { at: new Date().toISOString(), level: 'info', message: 'workspace B log' });
+
+    assert.notEqual(configA.stateDir, configB.stateDir);
+    assert.equal(new LiteStore(configA.stateDir).listSessions()[0].name, 'workspace-a-session');
+    assert.equal(new LiteStore(configB.stateDir).listSessions()[0].name, 'workspace-b-session');
+    const records = readWorkspaceRegistry(configDir);
+    assert.equal(records.length, 2);
+    assert.equal(resolveWorkspaceInput('1', records), records[0].workspaceDir);
+    assert.match(workspaceChoiceHint(records), /1=/);
+    const logs = readWorkspaceLogs(configDir);
+    assert.equal(logs.some((group) => group.entries.some((entry) => entry.message === 'workspace A log')), true);
+    assert.equal(logs.some((group) => group.entries.some((entry) => entry.message === 'workspace B log')), true);
+  } finally {
+    fs.rmSync(configDir, { recursive: true, force: true });
+    fs.rmSync(workspaceA, { recursive: true, force: true });
+    fs.rmSync(workspaceB, { recursive: true, force: true });
+  }
+});
+
+test('port conflict helpers choose a different available port', async () => {
+  const blocker = net.createServer();
+  await new Promise((resolve, reject) => {
+    blocker.once('error', reject);
+    blocker.listen(0, '127.0.0.1', resolve);
+  });
+  try {
+    const occupied = blocker.address().port;
+    const available = await findAvailablePort('127.0.0.1', occupied);
+    assert.notEqual(available, occupied);
+    assert.ok(available > 0 && available <= 65535);
+  } finally {
+    blocker.close();
+  }
+});
+
+test('workspace migration merges every legacy source without losing session content', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-merge-migration-'));
+  const target = path.join(root, 'target');
+  const older = path.join(root, 'global');
+  const workspace = path.join(root, 'workspace');
+  for (const dir of [target, older, workspace]) fs.mkdirSync(path.join(dir, 'history'), { recursive: true });
+  const base = { schemaVersion: 2, revision: 1, messages: [], events: [], subscriptions: [], appBindings: [], extensions: [] };
+  const session = (id, summary, updatedAt) => ({ id, name: id, role: 'lead', phase: 'completed', presence: 'unclaimed', tags: [], createdAt: '2026-01-01T00:00:00.000Z', updatedAt, latestCheckpoint: { at: updatedAt, phase: 'completed', summary }, finalSummary: summary });
+  fs.writeFileSync(path.join(older, 'state.json'), JSON.stringify({ ...base, sessions: [session('a', 'old-a', '2026-01-01T00:00:00.000Z'), session('b', 'only-b', '2026-01-02T00:00:00.000Z')] }));
+  fs.writeFileSync(path.join(workspace, 'state.json'), JSON.stringify({ ...base, revision: 4, sessions: [session('a', 'new-a', '2026-01-03T00:00:00.000Z'), session('c', 'only-c', '2026-01-04T00:00:00.000Z')] }));
+  fs.writeFileSync(path.join(older, 'history', 'a.jsonl'), JSON.stringify({ at: '2026-01-01T00:00:00.000Z', type: 'checkpoint', data: { summary: 'old-a' } }) + '\n');
+  fs.writeFileSync(path.join(workspace, 'history', 'a.jsonl'), JSON.stringify({ at: '2026-01-03T00:00:00.000Z', type: 'checkpoint', data: { summary: 'new-a' } }) + '\n');
+  try {
+    const first = migrateWorkspaceState(target, [older, workspace]);
+    const second = migrateWorkspaceState(target, [older, workspace]);
+    const state = JSON.parse(fs.readFileSync(path.join(target, 'state.json'), 'utf8'));
+    assert.equal(first.sessions, 3);
+    assert.equal(second.sessions, 3);
+    assert.deepEqual(state.sessions.map((item) => item.id).sort(), ['a', 'b', 'c']);
+    assert.equal(state.sessions.find((item) => item.id === 'a').finalSummary, 'new-a');
+    const history = fs.readFileSync(path.join(target, 'history', 'a.jsonl'), 'utf8').trim().split('\n');
+    assert.equal(history.length, 2);
+    assert.match(history[0], /old-a/);
+    assert.match(history[1], /new-a/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('update checker compares releases without blocking startup failures', async () => {
+  assert.equal(isNewerVersion('v1.0.2', '1.0.1'), true);
+  assert.equal(isNewerVersion('v1.0.1', '1.0.1'), false);
+  const available = await checkForUpdate(async () => new Response(JSON.stringify({ tag_name: 'v1.2.0' }), { status: 200 }));
+  assert.equal(available.updateAvailable, true);
+  assert.equal(available.latestVersion, '1.2.0');
+  const failed = await checkForUpdate(async () => new Response('offline', { status: 503 }));
+  assert.equal(failed.updateAvailable, false);
+  assert.match(failed.error, /HTTP 503/);
+});
+
+test('cluster rejects incompatible protocol versions and legacy servers are not joinable', async () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-cluster-protocol-'));
+  const first = new PortClusterRegistry(configDir, '127.0.0.1', 39991);
+  const second = new PortClusterRegistry(configDir, '127.0.0.1', 39991);
+  const member = (workspaceId, protocolVersion) => ({ pid: process.pid, appVersion: protocolVersion === 1 ? '1.0.1' : '2.0.0', protocolVersion, workspaceId, workspaceDir: `/tmp/${workspaceId}`, internalPort: 41000 + protocolVersion, connectorKey: CONNECTOR_KEY, actionsTokenHash: tokenHash(ACTIONS_TOKEN), secret: `secret-${workspaceId}` });
+  try {
+    first.register(member('workspace-one', 1));
+    assert.throws(() => second.register(member('workspace-two', 2)), /incompatible LocalTerminal Lite cluster protocol/);
+  } finally {
+    first.unregister();
+    fs.rmSync(configDir, { recursive: true, force: true });
+  }
+
+  const legacy = spawn(process.execPath, ['-e', `
+    const net = require('node:net');
+    const server = net.createServer((socket) => {
+      const body = JSON.stringify({ ok: true, product: 'localterminal-lite', version: '1.0.1' });
+      socket.end('HTTP/1.1 200 OK\\r\\nContent-Type: application/json\\r\\nContent-Length: ' + Buffer.byteLength(body) + '\\r\\nConnection: close\\r\\n\\r\\n' + body);
+    });
+    server.listen(0, '127.0.0.1', () => console.log(server.address().port));
+  `], { stdio: ['ignore', 'pipe', 'inherit'] });
+  const port = await new Promise((resolve, reject) => {
+    legacy.once('error', reject);
+    legacy.stdout.once('data', (chunk) => resolve(Number(String(chunk).trim())));
+  });
+  try {
+    const settings = { ...createDefaultSettings(process.cwd()), host: '127.0.0.1', port };
+    const errors = await validateSettingsFeasibility(settings);
+    assert.equal(errors.some((error) => error.includes('already in use')), true);
+  } finally {
+    const exited = new Promise((resolve) => legacy.once('exit', resolve));
+    legacy.kill('SIGTERM');
+    await exited;
+  }
+});
+
+
+test('three workspaces share one port, route by workspace and session, and survive leader exit', async () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-shared-port-config-'));
+  const blocker = net.createServer();
+  await new Promise((resolve, reject) => { blocker.once('error', reject); blocker.listen(0, '127.0.0.1', resolve); });
+  const port = blocker.address().port;
+  await new Promise((resolve) => blocker.close(resolve));
+  const dirs = [tempWorkspace(), tempWorkspace(), tempWorkspace()];
+  const settingsFile = path.join(configDir, 'config.json');
+  const runtimes = dirs.map((item) => new LiteRuntime({ ...item, settingsPath: settingsFile, host: '127.0.0.1', port, connectorKey: CONNECTOR_KEY, actionsToken: ACTIONS_TOKEN, publicBaseUrl: `http://127.0.0.1:${port}`, maxOutputChars: 20_000, commandTimeoutSec: 10, uiLanguage: 'zh-CN', uiTheme: 'dark' }));
+  const server = { baseUrl: `http://127.0.0.1:${port}` };
+  try {
+    for (const runtime of runtimes) await runtime.start();
+    const health = await fetch(`${server.baseUrl}/health`).then((response) => response.json());
+    assert.equal(health.clustered, true);
+    assert.equal(health.workspaces.length, 3);
+
+    const missing = await call(server, 'session_register', { mode: 'root', name: 'ambiguous', role: 'lead' });
+    assert.equal(missing.status, 400);
+    assert.equal(missing.body.error.code, 'WORKSPACE_REQUIRED');
+
+    const workspaceB = workspaceId(dirs[1].workspaceDir);
+    const workspaceC = workspaceId(dirs[2].workspaceDir);
+    const rootB = await call(server, 'session_register', { mode: 'root', name: 'workspace-b-root', role: 'lead', workspaceId: workspaceB });
+    const rootC = await call(server, 'session_register', { mode: 'root', name: 'workspace-c-root', role: 'lead', workspaceId: workspaceC });
+    assert.equal(rootB.body.ok, true, JSON.stringify(rootB.body));
+    assert.equal(rootC.body.ok, true, JSON.stringify(rootC.body));
+
+    const identityB = rootB.body.data.result.identity;
+    const listB = await call(server, 'session_list', {}, identityB);
+    assert.equal(listB.body.ok, true, JSON.stringify(listB.body));
+    const namesB = listB.body.data.result.sessions.map((item) => item.name);
+    assert.equal(namesB.includes('workspace-b-root'), true);
+    assert.equal(namesB.includes('workspace-c-root'), false);
+
+    await runtimes[0].close();
+    const deadline = Date.now() + 8000;
+    let recovered;
+    while (Date.now() < deadline) {
+      try {
+        const response = await fetch(`${server.baseUrl}/health`);
+        if (response.ok) { recovered = await response.json(); break; }
+      } catch {}
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    assert.ok(recovered, 'a follower should take over the public port');
+    assert.equal(recovered.workspaces.length, 2);
+    const afterFailover = await call(server, 'session_list', {}, identityB);
+    assert.equal(afterFailover.body.ok, true, JSON.stringify(afterFailover.body));
+  } finally {
+    for (const runtime of runtimes.slice(1)) await runtime.close().catch(() => undefined);
+    fs.rmSync(configDir, { recursive: true, force: true });
+    for (const item of dirs) fs.rmSync(item.workspaceDir, { recursive: true, force: true });
+  }
+});
+
+test('terminal session cleanup terminates a bound helper process', async () => {
+  const workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-resource-workspace-'));
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-resource-state-'));
+  const child = spawn(process.execPath, ['-e', "process.title='LocalTerminalLitePassiveLock'; setInterval(() => {}, 1000)"], { stdio: 'ignore' });
+  const sessionId = 'ses_resource_cleanup_test';
+  const directory = path.join(stateDir, 'session-resources');
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(path.join(directory, `${sessionId}.pid`), `${child.pid}
+`);
+  const config = { workspaceDir, stateDir };
+  try {
+    const result = disarmSessionResources(config, sessionId);
+    assert.equal(result.disarmed, true);
+    await new Promise((resolve) => child.once('exit', resolve));
+    assert.equal(fs.existsSync(path.join(directory, `${sessionId}.pid`)), false);
+  } finally {
+    child.kill('SIGKILL');
+    fs.rmSync(workspaceDir, { recursive: true, force: true });
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test('session resource cleanup refuses to kill a reused unrelated PID', async () => {
+  const workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-resource-workspace-'));
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-resource-state-'));
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  const sessionId = 'ses_reused_pid_test';
+  const directory = path.join(stateDir, 'session-resources');
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(path.join(directory, `${sessionId}.pid`), `${child.pid}\n`);
+  try {
+    const result = disarmSessionResources({ workspaceDir, stateDir }, sessionId);
+    assert.equal(result.disarmed, false);
+    assert.doesNotThrow(() => process.kill(child.pid, 0));
+    assert.equal(fs.existsSync(path.join(directory, `${sessionId}.pid`)), false);
+  } finally {
+    child.kill('SIGKILL');
+    fs.rmSync(workspaceDir, { recursive: true, force: true });
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test('runtime close disarms every registered session helper', async () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-resource-config-'));
+  const workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-resource-workspace-'));
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-resource-state-'));
+  const settingsPath = path.join(configDir, 'config.json');
+  const children = [
+    spawn(process.execPath, ['-e', "process.title='LocalTerminalLitePassiveLock'; setInterval(() => {}, 1000)"], { stdio: 'ignore' }),
+    spawn(process.execPath, ['-e', "process.title='LocalTerminalLitePassiveLock'; setInterval(() => {}, 1000)"], { stdio: 'ignore' }),
+    spawn(process.execPath, ['-e', "process.title='LocalTerminalLitePassiveLock'; setInterval(() => {}, 1000)"], { stdio: 'ignore' }),
+  ];
+  const directory = path.join(stateDir, 'session-resources');
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(path.join(directory, 'ses_one.pid'), `${children[0].pid}
+`);
+  fs.writeFileSync(path.join(directory, 'ses_two.pid'), `${children[1].pid}
+`);
+  fs.writeFileSync(path.join(directory, 'passive-lock.pid'), `${children[2].pid}
+`);
+  const runtime = new LiteRuntime({ workspaceDir, stateDir, settingsPath, host: '127.0.0.1', port: 0, connectorKey: CONNECTOR_KEY, actionsToken: ACTIONS_TOKEN, publicBaseUrl: '', maxOutputChars: 20_000, commandTimeoutSec: 10, uiLanguage: 'zh-CN', uiTheme: 'dark', passiveLockEnabled: false });
+  try {
+    await runtime.start();
+    await runtime.close();
+    await Promise.all(children.map((child) => new Promise((resolve) => child.once('exit', resolve))));
+    assert.equal(fs.readdirSync(directory).some((entry) => entry.endsWith('.pid')), false);
+  } finally {
+    for (const child of children) child.kill('SIGKILL');
+    fs.rmSync(configDir, { recursive: true, force: true });
+    fs.rmSync(workspaceDir, { recursive: true, force: true });
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  }
 });
 
 test('OpenAPI 3.1 exposes exactly three facade operations and concrete identity schemas', async () => {
@@ -206,8 +521,14 @@ test('checkpoint reminder, block, and stale transitions use fixed non-resetting 
     store.beforeOrdinaryCall(created.session.id); const activity = Date.parse(store.session(created.session.id).controller.lastActivityAt); now = activity + SESSION_TIMING.STALE_MS; store.refreshTemporalStates();
     assert.equal(store.session(created.session.id).presence, 'stale');
     const recoveryPrompt = store.handoffForTui(created.session.id); assert.ok(recoveryPrompt);
-    const recoveryCode = recoveryPrompt.match(/"claimCode":"([a-f0-9]+)"/)[1]; const recovered = store.inherit(created.session.id, recoveryCode);
+    const restarted = new LiteStore(dirs.stateDir, () => now);
+    assert.equal(restarted.handoffForTui(created.session.id), undefined);
+    const recovered = restarted.inherit(created.session.id, { sessionToken: created.identity.sessionToken });
     assert.equal(recovered.session.presence, 'claimed'); assert.notEqual(recovered.identity.sessionToken, created.identity.sessionToken);
+    const released = restarted.release(recovered.session.id);
+    assert.throws(() => restarted.inherit(created.session.id, { sessionToken: created.identity.sessionToken }), (error) => error.code === 'INVALID_RECOVERY_CREDENTIAL');
+    const handedOff = restarted.inherit(created.session.id, { claimCode: released.claimCode });
+    assert.equal(handedOff.session.presence, 'claimed');
   } finally { fs.rmSync(dirs.workspaceDir, { recursive: true, force: true }); }
 });
 
