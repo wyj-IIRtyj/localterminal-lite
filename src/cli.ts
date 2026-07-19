@@ -58,18 +58,24 @@ async function ensureSettings(headless: boolean, env: NodeJS.ProcessEnv): Promis
 }
 
 
-async function chooseWorkspace(env: NodeJS.ProcessEnv): Promise<void> {
+class StartupCancelled extends Error {
+  constructor() { super('Startup cancelled.'); this.name = 'StartupCancelled'; }
+}
+
+async function chooseWorkspace(env: NodeJS.ProcessEnv): Promise<boolean> {
   const current = readLiteSettings(env);
-  if (!current) return;
+  if (!current) return true;
   const records = readWorkspaceRegistry(path.dirname(settingsPath(env)));
-  if (!records.length) return;
+  if (!records.length) return true;
   const { runWorkspaceChooserTui } = await import('./tui/index.js');
   const available = records.filter((record) => !isWorkspaceRecordActive(record));
   if (!available.length) throw new Error('Every registered workspace is already active in another LocalTerminal Lite process.');
   const selected = await runWorkspaceChooserTui(available, current.workspaceDir, current.uiLanguage === 'zh-CN');
+  if (!selected) return false;
   const active = records.find((record) => path.resolve(record.workspaceDir) === path.resolve(selected) && isWorkspaceRecordActive(record));
   if (active) throw new Error(`Workspace is already active in PID ${active.lastPid}: ${active.workspaceDir}`);
   saveLiteSettings({ ...current, workspaceDir: selected }, env);
+  return true;
 }
 
 async function startRuntime(env: NodeJS.ProcessEnv, interactive = false): Promise<LiteRuntime> {
@@ -100,7 +106,7 @@ async function startRuntime(env: NodeJS.ProcessEnv, interactive = false): Promis
         console.log(`Using available port ${port}.`);
         continue;
       }
-      throw error;
+      throw new StartupCancelled();
     }
   }
 }
@@ -113,7 +119,7 @@ async function main(): Promise<void> {
   const headless = process.argv.includes('--headless') || !process.stdin.isTTY || !process.stdout.isTTY;
   const env = effectiveEnvironment(headless);
   await ensureSettings(headless, env);
-  if (!headless) await chooseWorkspace(env);
+  if (!headless && !(await chooseWorkspace(env))) return;
   let runtime = await startRuntime(env, !headless);
   if (!headless) {
     const { LiteTui } = await import('./tui/index.js');
@@ -170,7 +176,7 @@ function fatalErrorReport(error: unknown): string {
 }
 
 main().catch((error) => {
-  if (error instanceof Error && error.message === 'Setup cancelled.') return;
+  if (error instanceof StartupCancelled || (error instanceof Error && error.message === 'Setup cancelled.')) return;
   console.error(fatalErrorReport(error));
   process.exit(1);
 });

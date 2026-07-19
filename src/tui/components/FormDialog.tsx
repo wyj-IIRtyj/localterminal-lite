@@ -1,4 +1,4 @@
-import type { InputRenderable, TextareaRenderable } from '@opentui/core';
+import type { InputRenderable, ScrollBoxRenderable, TextareaRenderable } from '@opentui/core';
 import { useBindings } from '@opentui/keymap/react';
 import { useEffect, useRef, useState } from 'react';
 import type { FormQuestion, Theme } from '../state.js';
@@ -29,6 +29,7 @@ export function FormDialog({ questions, preamble, theme, width, height, zh, onCo
   const selectedOptionsRef = useRef(initial.selectedOptions);
   const inputRef = useRef<InputRenderable>(null);
   const textareaRef = useRef<TextareaRenderable>(null);
+  const optionsScrollRef = useRef<ScrollBoxRenderable>(null);
   const question = questions[index];
   const options = question?.options || [];
   const labels = question?.optionLabels || options;
@@ -99,6 +100,12 @@ export function FormDialog({ questions, preamble, theme, width, height, zh, onCo
     else if (!question?.options) inputRef.current?.focus();
   }, [index, question?.multiline, question?.options]);
 
+  useEffect(() => {
+    if (question?.options && question.optionsLayout === 'column') {
+      optionsScrollRef.current?.scrollChildIntoView(`form-option-${index}-${optionIndex}`);
+    }
+  }, [index, optionIndex, question?.options, question?.optionsLayout]);
+
   if (!question) return null;
   const questionLabel = typeof question.label === 'function' ? question.label(answers) : question.label;
   const columnOptions = question.optionsLayout === 'column';
@@ -119,12 +126,13 @@ export function FormDialog({ questions, preamble, theme, width, height, zh, onCo
         <box flexDirection="column" flexShrink={0} marginTop={1}>
           <text fg={theme.accent} wrapMode="word"><b>{index + 1}/{questions.length} · {questionLabel}</b></text>
           {question.options ? (
+            <scrollbox ref={optionsScrollRef} height={Math.max(3, Math.min(16, height - 10))} viewportCulling scrollY={columnOptions}>
             <box flexDirection={columnOptions ? 'column' : 'row'} flexWrap={columnOptions ? 'no-wrap' : 'wrap'} gap={1} marginTop={1}>
               {options.map((option, position) => {
                 const active = position === optionIndex;
                 const selected = question.multiSelect ? selectedOptions.includes(option) : active;
                 return (
-                  <box key={option} flexDirection="column" width={columnOptions ? '100%' : undefined} paddingLeft={1} paddingRight={1} backgroundColor={active ? theme.selected : theme.panelAlt} onMouseDown={() => {
+                  <box id={`form-option-${index}-${position}`} key={option} flexDirection="column" width={columnOptions ? '100%' : undefined} paddingLeft={1} paddingRight={1} backgroundColor={active ? theme.selected : theme.panelAlt} onMouseDown={() => {
                     optionIndexRef.current = position;
                     setOptionIndex(position);
                     if (question.multiSelect) {
@@ -138,6 +146,7 @@ export function FormDialog({ questions, preamble, theme, width, height, zh, onCo
                 );
               })}
             </box>
+            </scrollbox>
           ) : question.multiline ? (
             <textarea
               key={`textarea-${index}`}

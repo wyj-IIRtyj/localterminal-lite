@@ -379,6 +379,21 @@ test('session resource cleanup refuses to kill a reused unrelated PID', async ()
   }
 });
 
+test('startup usability gates keep workspace options scrollable and cancellation non-fatal', () => {
+  const formDialog = fs.readFileSync(path.join(process.cwd(), 'src/tui/components/FormDialog.tsx'), 'utf8');
+  const tuiIndex = fs.readFileSync(path.join(process.cwd(), 'src/tui/index.tsx'), 'utf8');
+  const cli = fs.readFileSync(path.join(process.cwd(), 'src/cli.ts'), 'utf8');
+  assert.match(formDialog, /ScrollBoxRenderable/);
+  assert.match(formDialog, /scrollChildIntoView/);
+  assert.match(formDialog, /height=\{Math\.max\(3, Math\.min\(16, height - 10\)\)\}/);
+  assert.match(tuiIndex, /onCancel: \(\) => resolve\(undefined\)/);
+  assert.match(tuiIndex, /onCancel: \(\) => resolve\('cancel'\)/);
+  assert.match(cli, /class StartupCancelled extends Error/);
+  assert.match(cli, /if \(!headless && !\(await chooseWorkspace\(env\)\)\) return/);
+  assert.match(cli, /throw new StartupCancelled\(\)/);
+  assert.match(cli, /error instanceof StartupCancelled/);
+});
+
 test('form option state submits the latest multi-select values and resets between questions', () => {
   const fields = { label: 'Choose settings', options: ['port', 'passive-lock'], multiSelect: true };
   const state = initialQuestionState(fields);

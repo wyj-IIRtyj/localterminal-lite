@@ -52,7 +52,7 @@ export async function runSetupTui(defaults: LiteSettings): Promise<LiteSettings>
   }
 }
 
-export async function runWorkspaceChooserTui(records: WorkspaceRecord[], currentWorkspaceDir: string, zh = true): Promise<string> {
+export async function runWorkspaceChooserTui(records: WorkspaceRecord[], currentWorkspaceDir: string, zh = true): Promise<string | undefined> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('Workspace selection requires an interactive terminal.');
   const renderer = await createRenderer();
   let root: Root | undefined;
@@ -73,7 +73,7 @@ export async function runWorkspaceChooserTui(records: WorkspaceRecord[], current
     optionsLayout: 'column',
   };
   try {
-    return await new Promise<string>((resolve, reject) => {
+    return await new Promise<string | undefined>((resolve, reject) => {
       root = renderWithKeymap(renderer, createElement(FormDialog, {
         questions: [question],
         preamble: [zh ? '使用方向键或鼠标选择工作区。' : 'Choose a workspace with arrow keys or the mouse.'],
@@ -86,7 +86,7 @@ export async function runWorkspaceChooserTui(records: WorkspaceRecord[], current
           if (!selected) reject(new Error('Invalid workspace selection.'));
           else resolve(selected.workspaceDir);
         },
-        onCancel: () => reject(new Error('Workspace selection cancelled.')),
+        onCancel: () => resolve(undefined),
       }));
     });
   } finally {
@@ -109,7 +109,7 @@ export async function runChoiceTui(question: FormQuestion, preamble: string[], z
         height: renderer.height,
         zh,
         onComplete: (answers: string[]) => resolve(answers[0] || question.fallback || ''),
-        onCancel: () => reject(new Error('Selection cancelled.')),
+        onCancel: () => resolve('cancel'),
       }));
     });
   } finally {
