@@ -18,7 +18,6 @@ type Actions = {
   addExtension: () => void | Promise<void>;
   removeExtension: () => void | Promise<void>;
   configure: () => void | Promise<void>;
-  toggleCredentials: () => void;
   rotateCredentials: () => void | Promise<void>;
   updateApplication: () => void | Promise<void>;
   toggleAudit: () => void;
@@ -59,12 +58,11 @@ export function useAppKeymap(actions: Actions): void {
       ] : []),
       ...([0, 5].includes(tab) ? [
         { key: 'c', cmd: command(actions.configure) },
-        { key: 'v', cmd: command(actions.toggleCredentials) },
       ] : []),
       ...(tab === 5 ? [{ key: 'k', cmd: command(actions.rotateCredentials) }, { key: 'u', cmd: command(actions.updateApplication) }] : []),
       ...(tab === 6 ? [{ key: 'a', cmd: command(actions.toggleAudit) }] : []),
     ],
-  }), [enabled, detail, tab, actions.moveSelection, actions.open, actions.createSession, actions.sessionAction, actions.sendMessage, actions.refreshDiff, actions.addExtension, actions.removeExtension, actions.configure, actions.toggleCredentials, actions.rotateCredentials, actions.updateApplication, actions.toggleAudit]);
+  }), [enabled, detail, tab, actions.moveSelection, actions.open, actions.createSession, actions.sessionAction, actions.sendMessage, actions.refreshDiff, actions.addExtension, actions.removeExtension, actions.configure, actions.rotateCredentials, actions.updateApplication, actions.toggleAudit]);
 
   useBindings(() => ({
     priority: 100,

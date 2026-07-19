@@ -14,7 +14,7 @@ export type Tab = (typeof TABS)[number];
 export type Detail = { kind: 'session'; id: string } | { kind: 'conversation'; id: string };
 export type RuntimeReconfigureResult = { runtime: LiteRuntime; error?: string };
 export type RuntimeReconfigure = (settings: LiteSettings) => Promise<RuntimeReconfigureResult>;
-export type FormQuestion = { label: string | ((previous: string[]) => string); fallback?: string; multiline?: boolean; sensitive?: boolean; validate?: (value: string, previous: string[]) => string | undefined | Promise<string | undefined> };
+export type FormQuestion = { label: string | ((previous: string[]) => string); fallback?: string; multiline?: boolean; sensitive?: boolean; options?: string[]; optionLabels?: string[]; multiSelect?: boolean; validate?: (value: string, previous: string[]) => string | undefined | Promise<string | undefined> };
 export type Ask = (questions: FormQuestion[], preamble?: string[]) => Promise<string[] | undefined>;
 
 export type Theme = {
@@ -144,7 +144,7 @@ export class TuiController {
       this.currentRuntime.log(this.text('One-click update is disabled for a Git source checkout. Pull and review changes manually.', 'Git 源码工作区已禁用一键更新，请手动拉取并审查更改。'), 'error');
       return;
     }
-    const answer = await ask([{ label: this.text(`Install ${this.update.latestVersion} now? yes|no`, `立即安装 ${this.update.latestVersion}？yes|no`), fallback: 'no' }]);
+    const answer = await ask([{ label: this.text(`Install ${this.update.latestVersion} now?`, `立即安装 ${this.update.latestVersion}？`), fallback: 'no', options: ['yes', 'no'] }]);
     if (!answer || !['yes', 'y'].includes(answer[0].toLowerCase())) return;
     this.currentRuntime.log(`Installing LocalTerminal Lite ${this.update.latestVersion}...`);
     const clusterVersions = this.currentRuntime.clusterVersions();
@@ -181,7 +181,7 @@ export class TuiController {
 
   async createSession(ask: Ask): Promise<void> {
     const roots = this.currentRuntime.store.listSessions().filter((session) => !session.parentSessionId && !['completed', 'cancelled'].includes(session.phase));
-    const first = await ask([{ label: this.text('Create root or child', '创建 root 或 child'), fallback: roots.length ? 'child' : 'root' }]);
+    const first = await ask([{ label: this.text('Create root or child', '创建 root 或 child'), fallback: roots.length ? 'child' : 'root', options: ['root', 'child'] }]);
     if (!first) return;
     if (first[0] === 'root') {
       const answers = await ask([{ label: this.text('Root session name', 'Root session 名称') }, { label: this.text('Role', '角色'), fallback: 'lead' }]);
@@ -211,7 +211,8 @@ export class TuiController {
 
   async sessionAction(session: LiteSession, ask: Ask): Promise<Detail | undefined> {
     const terminal = ['completed', 'cancelled'].includes(session.phase);
-    const answers = await ask([{ label: `${this.text('Action', '操作')} ${terminal ? 'context|delete|continue' : 'copy|revoke|cancel|context|delete'}`, fallback: 'context' }], [
+    const actions = terminal ? ['context', 'delete', 'continue'] : ['copy', 'revoke', 'cancel', 'context', 'delete'];
+    const answers = await ask([{ label: this.text('Action', '操作'), fallback: 'context', options: actions }], [
       `${session.name}  ${session.phase}/${session.presence}`,
       session.id,
       session.latestCheckpoint?.summary || this.text('No checkpoint summary.', '暂无 checkpoint 总结。'),
@@ -258,12 +259,12 @@ export class TuiController {
   }
 
   async addExtension(ask: Ask): Promise<void> {
-    const first = await ask([{ label: 'Extension name (lower_snake_case)' }, { label: this.text('Title', '标题') }, { label: this.text('Description', '说明'), multiline: true }, { label: 'Handler builtin|command', fallback: 'builtin' }]);
+    const first = await ask([{ label: 'Extension name (lower_snake_case)' }, { label: this.text('Title', '标题') }, { label: this.text('Description', '说明'), multiline: true }, { label: 'Handler', fallback: 'builtin', options: ['builtin', 'command'] }]);
     if (!first?.[0]) return;
     const base = { name: first[0], title: first[1] || first[0], description: first[2] || 'Custom declarative extension registered from the Lite TUI.' };
     let spec: CustomExtensionSpec;
     if (first[3] === 'command') {
-      const values = await ask([{ label: 'Executable' }, { label: 'Argument templates JSON', fallback: '[]', multiline: true }, { label: 'Input JSON Schema', fallback: '{"type":"object","properties":{},"additionalProperties":false}', multiline: true }, { label: 'Read-only yes|no', fallback: 'no' }]);
+      const values = await ask([{ label: 'Executable' }, { label: 'Argument templates JSON', fallback: '[]', multiline: true }, { label: 'Input JSON Schema', fallback: '{"type":"object","properties":{},"additionalProperties":false}', multiline: true }, { label: 'Read-only', fallback: 'no', options: ['yes', 'no'] }]);
       if (!values) return;
       spec = { ...base, inputSchema: JSON.parse(values[2]), annotations: { readOnlyHint: values[3] === 'yes', destructiveHint: values[3] !== 'yes', openWorldHint: true, idempotentHint: values[3] === 'yes' }, handler: { kind: 'command', executable: values[0], args: JSON.parse(values[1]) } };
     } else {
@@ -309,11 +310,8 @@ export class TuiController {
     const workspaceLines = knownWorkspaces.length
       ? knownWorkspaces.map((item, index) => `${index + 1}. ${item.label || path.basename(item.workspaceDir)}\n   ${item.workspaceDir}\n   ${isWorkspaceRecordActive(item) ? this.text(`active · ${item.lastHost || '127.0.0.1'}:${item.lastPort || '?'}`, `运行中 · ${item.lastHost || '127.0.0.1'}:${item.lastPort || '?'}`) : this.text('inactive', '未运行')}`)
       : [this.text('No registered workspaces.', '没有已登记的工作区。')];
-    const selection = await ask([{ label: this.text('Fields to edit (comma-separated)', '选择要修改的字段（逗号分隔）'), fallback: 'port', validate: (value) => {
-      const allowed = new Set(['language', 'theme', 'workspace', 'host', 'port', 'public-url', 'max-output', 'timeout', 'passive-lock']);
-      const fields = value.split(',').map((item) => item.trim().toLowerCase()).filter(Boolean);
-      return fields.length && fields.every((field) => allowed.has(field)) ? undefined : this.text('Use: language, theme, workspace, host, port, public-url, max-output, timeout, passive-lock', '可选：language、theme、workspace、host、port、public-url、max-output、timeout、passive-lock');
-    } }], [
+    const settingFields = ['language', 'theme', 'workspace', 'host', 'port', 'public-url', 'max-output', 'timeout', 'passive-lock'];
+    const selection = await ask([{ label: this.text('Choose settings to edit', '选择要修改的设置'), fallback: 'port', options: settingFields, multiSelect: true }], [
       this.text('Edit only the settings you choose.', '只修改你选择的设置；未选择的项目保持不变。'),
       this.text('Available fields:', '可选字段：'),
       'language, theme, workspace, host, port, public-url, max-output, timeout, passive-lock',
@@ -325,15 +323,15 @@ export class TuiController {
     const fields = [...new Set(selection[0].split(',').map((item) => item.trim().toLowerCase()).filter(Boolean))];
     const questions: FormQuestion[] = [];
     for (const field of fields) {
-      if (field === 'language') questions.push({ label: 'UI language zh-CN|en', fallback: current.uiLanguage, validate: (value) => ['zh-CN', 'en'].includes(value) ? undefined : 'Use zh-CN or en.' });
-      else if (field === 'theme') questions.push({ label: 'UI theme dark|light', fallback: current.uiTheme, validate: (value) => ['dark', 'light'].includes(value) ? undefined : 'Use dark or light.' });
+      if (field === 'language') questions.push({ label: 'UI language', fallback: current.uiLanguage, options: ['zh-CN', 'en'] });
+      else if (field === 'theme') questions.push({ label: 'UI theme', fallback: current.uiTheme, options: ['dark', 'light'] });
       else if (field === 'workspace') questions.push({ label: this.text('Workspace path or number', '工作区路径或编号'), fallback: current.workspaceDir, validate: (value) => isDirectory(resolveWorkspaceInput(value, knownWorkspaces)) ? undefined : this.text('Workspace must be an accessible directory.', '工作区必须是可访问的目录。') });
       else if (field === 'host') questions.push({ label: this.text('Listen host', '监听地址'), fallback: current.host, validate: (value) => value.trim() ? undefined : this.text('Host cannot be empty.', '监听地址不能为空。') });
       else if (field === 'port') questions.push({ label: this.text('Listen port', '监听端口'), fallback: String(current.port), validate: (value) => { const port = Number(value); return Number.isInteger(port) && port >= 0 && port <= 65535 ? undefined : this.text('Port must be an integer from 0 to 65535.', '端口必须是 0 到 65535 的整数。'); } });
       else if (field === 'public-url') questions.push({ label: this.text('Public HTTPS URL (local clears)', '公网 HTTPS URL（local 清空）'), fallback: current.publicBaseUrl || 'local', validate: (value) => value.toLowerCase() === 'local' || isValidPublicBaseUrl(value.replace(/\/$/, '')) ? undefined : this.text('Use HTTPS; localhost may use HTTP.', '请使用 HTTPS；localhost 可使用 HTTP。') });
       else if (field === 'max-output') questions.push({ label: this.text('Maximum output characters', '最大输出字符'), fallback: String(current.maxOutputChars), validate: (value) => { const number = Number(value); return Number.isInteger(number) && number >= 4000 && number <= 1000000 ? undefined : this.text('Use an integer from 4000 to 1000000.', '请输入 4000 到 1000000 的整数。'); } });
       else if (field === 'timeout') questions.push({ label: this.text('Command timeout seconds', '命令超时秒数'), fallback: String(current.commandTimeoutSec), validate: (value) => { const number = Number(value); return Number.isInteger(number) && number >= 1 && number <= 3600 ? undefined : this.text('Use an integer from 1 to 3600.', '请输入 1 到 3600 的整数。'); } });
-      else if (field === 'passive-lock') questions.push({ label: this.text('macOS passive lock off|arm|standby', 'macOS 被动锁屏 off|arm|standby'), fallback: passiveFallback, validate: (value) => ['off', 'arm', 'standby'].includes(value.toLowerCase()) ? undefined : this.text('Use off, arm, or standby.', '请输入 off、arm 或 standby。') });
+      else if (field === 'passive-lock') questions.push({ label: this.text('macOS passive lock', 'macOS 被动锁屏'), fallback: passiveFallback, options: ['off', 'arm', 'standby'] });
     }
     const answers = await ask(questions, [this.text(`Editing: ${fields.join(', ')}`, `正在修改：${fields.join(', ')}`)]);
     if (!answers) return;
@@ -358,7 +356,7 @@ export class TuiController {
     const errors = await validateSettingsFeasibility(next, { host: config.host, port: this.currentRuntime.port });
     const conflict = errors.find((error) => error.includes('already in use'));
     if (conflict) {
-      const decision = await ask([{ label: `${this.text('Port occupied by another program', '端口被其他程序占用')} · ${describePortOwner(next.port)} · kill|next|cancel`, fallback: 'cancel', validate: (value) => ['kill', 'next', 'cancel'].includes(value.toLowerCase()) ? undefined : this.text('Use kill, next, or cancel.', '请输入 kill、next 或 cancel。') }]);
+      const decision = await ask([{ label: `${this.text('Port occupied by another program', '端口被其他程序占用')} · ${describePortOwner(next.port)}`, fallback: 'cancel', options: ['kill', 'next', 'cancel'] }]);
       const policy = decision?.[0].toLowerCase() || 'cancel';
       try {
         if (policy === 'kill') await terminatePortOwner(next.port);
@@ -375,7 +373,7 @@ export class TuiController {
   }
 
   async rotateCredentials(ask: Ask): Promise<void> {
-    const answers = await ask([{ label: this.text('Rotate Apps and Actions credentials? yes|no', '轮换 Apps 与 Actions 凭据？yes|no'), fallback: 'no' }]);
+    const answers = await ask([{ label: this.text('Rotate Apps and Actions credentials?', '轮换 Apps 与 Actions 凭据？'), fallback: 'no', options: ['yes', 'no'] }]);
     if (answers?.[0].toLowerCase() !== 'yes') return;
     const current = readLiteSettings();
     if (!current) { this.currentRuntime.log('Persistent settings unavailable.', 'error'); return; }

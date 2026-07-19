@@ -1,5 +1,5 @@
 import { type ScrollBoxRenderable } from '@opentui/core';
-import { useRenderer, useTerminalDimensions } from '@opentui/react';
+import { useKeyboard, useRenderer, useTerminalDimensions } from '@opentui/react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { conversationGroups, logicalSessionGroups } from '../tui-model.js';
 import { copyToHostClipboard, themeFor, TABS, type Ask, type Detail, type FormQuestion, type TuiController } from './state.js';
@@ -132,8 +132,7 @@ export function App({ controller, onExit }: { controller: TuiController; onExit:
   const addExtensionAction = useCallback(() => runAction(() => controller.addExtension(ask)), [runAction, controller, ask]);
   const removeExtensionAction = useCallback(() => runAction(() => controller.removeExtension(controller.runtime.store.snapshot().extensions[selected[4] || 0]?.name, ask)), [runAction, controller, selected, ask]);
   const configureAction = useCallback(() => runAction(() => controller.editSettings(ask)), [runAction, controller, ask]);
-  const toggleCredentials = useCallback(() => setRevealCredentials((value) => !value), []);
-  const rotateCredentialsAction = useCallback(() => runAction(async () => { await controller.rotateCredentials(ask); setRevealCredentials(true); }), [runAction, controller, ask]);
+  const rotateCredentialsAction = useCallback(() => runAction(async () => { await controller.rotateCredentials(ask); }), [runAction, controller, ask]);
   const updateApplicationAction = useCallback(() => runAction(() => controller.updateApplication(ask)), [runAction, controller, ask]);
   const toggleAudit = useCallback(() => setShowAudit((value) => !value), []);
   const pageActions = useMemo(() => ({
@@ -153,12 +152,15 @@ export function App({ controller, onExit }: { controller: TuiController; onExit:
     addExtension: addExtensionAction,
     removeExtension: removeExtensionAction,
     configure: configureAction,
-    toggleCredentials,
     rotateCredentials: rotateCredentialsAction,
     updateApplication: updateApplicationAction,
     toggleAudit,
-  }), [form, tab, detail, switchTab, nextTab, back, quit, moveSelection, open, createSessionAction, sessionAction, sendMessageAction, refreshDiffAction, addExtensionAction, removeExtensionAction, configureAction, toggleCredentials, rotateCredentialsAction, updateApplicationAction, toggleAudit]);
+  }), [form, tab, detail, switchTab, nextTab, back, quit, moveSelection, open, createSessionAction, sessionAction, sendMessageAction, refreshDiffAction, addExtensionAction, removeExtensionAction, configureAction, rotateCredentialsAction, updateApplicationAction, toggleAudit]);
   useAppKeymap(pageActions);
+  useKeyboard((event) => {
+    if (form || detail || ![0, 5].includes(tab) || event.name.toLowerCase() !== 'v') return;
+    setRevealCredentials(event.eventType !== 'release');
+  }, { release: true });
 
   const copySelection = useCallback(() => {
     if (!renderer.hasSelection) return;

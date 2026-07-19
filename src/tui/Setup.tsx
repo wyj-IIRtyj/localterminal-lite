@@ -2,7 +2,7 @@ import path from 'node:path';
 import { useTerminalDimensions } from '@opentui/react';
 import { useState } from 'react';
 import { settingsPath, validateSettings, validateSettingsFeasibility } from '../config.js';
-import { describePortOwner, findAvailablePort, readWorkspaceRegistry, resolveWorkspaceInput, terminatePortOwner, workspaceChoiceHint } from '../instances.js';
+import { describePortOwner, findAvailablePort, isWorkspaceRecordActive, readWorkspaceRegistry, resolveWorkspaceInput, terminatePortOwner } from '../instances.js';
 import type { LiteSettings } from '../types.js';
 import { themeFor, type FormQuestion } from './state.js';
 import { FormDialog } from './components/FormDialog.js';
@@ -22,19 +22,22 @@ export function Setup({ defaults, onComplete, onCancel }: { defaults: LiteSettin
   ]);
   const theme = themeFor(defaults.uiTheme);
   const knownWorkspaces = readWorkspaceRegistry(path.dirname(settingsPath()));
-  const workspaceHint = workspaceChoiceHint(knownWorkspaces);
+  const workspaceOptions = knownWorkspaces.map((item, index) => String(index + 1));
+  const workspaceLabels = knownWorkspaces.map((item) => `${item.label || path.basename(item.workspaceDir)} · ${item.workspaceDir} · ${isWorkspaceRecordActive(item) ? `${item.lastHost || '127.0.0.1'}:${item.lastPort || '?'}` : 'inactive'}`);
   const questions: FormQuestion[] = pendingConflict ? [
-    { label: `端口被非 LocalTerminal 程序占用 / Port occupied · ${describePortOwner(pendingConflict.candidate.port)} · kill|next|cancel`, fallback: 'cancel', validate: (value) => ['kill', 'next', 'cancel'].includes(value.toLowerCase()) ? undefined : 'Use kill, next, or cancel.' },
+    { label: `端口被非 LocalTerminal 程序占用 / Port occupied · ${describePortOwner(pendingConflict.candidate.port)}`, fallback: 'cancel', options: ['kill', 'next', 'cancel'] },
   ] : [
-    { label: '界面语言 / UI language zh-CN|en', fallback: defaults.uiLanguage },
-    { label: '界面主题 / UI theme dark|light', fallback: defaults.uiTheme },
-    { label: `工作区路径或编号 / Workspace path or number${workspaceHint ? ` · ${workspaceHint}` : ''}`, fallback: defaults.workspaceDir, validate: (value) => { const selected = resolveWorkspaceInput(value, knownWorkspaces); try { return path.resolve(selected) ? undefined : 'Invalid workspace.'; } catch { return 'Invalid workspace.'; } } },
+    { label: '界面语言 / UI language', fallback: defaults.uiLanguage, options: ['zh-CN', 'en'] },
+    { label: '界面主题 / UI theme', fallback: defaults.uiTheme, options: ['dark', 'light'] },
+    knownWorkspaces.length
+      ? { label: '选择工作区 / Select workspace', fallback: workspaceOptions[0], options: workspaceOptions, optionLabels: workspaceLabels }
+      : { label: '工作区路径 / Workspace path', fallback: defaults.workspaceDir, validate: (value) => { try { return path.resolve(value) ? undefined : 'Invalid workspace.'; } catch { return 'Invalid workspace.'; } } },
     { label: '监听地址 / Host', fallback: defaults.host },
     { label: '端口 / Port', fallback: String(defaults.port), validate: (value) => { const port = Number(value); return Number.isInteger(port) && port >= 0 && port <= 65535 ? undefined : 'Port must be 0-65535.'; } },
     { label: '公网 HTTPS URL / Public URL (optional)', fallback: defaults.publicBaseUrl },
     { label: '最大输出字符 / Max output', fallback: String(defaults.maxOutputChars) },
     { label: '命令超时秒数 / Timeout', fallback: String(defaults.commandTimeoutSec) },
-    { label: '保存并启动 / Save and start? yes|no', fallback: 'yes' },
+    { label: '保存并启动 / Save and start?', fallback: 'yes', options: ['yes', 'no'] },
   ];
 
   const submit = async (answers: string[]) => {
