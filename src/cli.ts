@@ -8,9 +8,8 @@ import {
   settingsPath,
 } from './config.js';
 import { LiteRuntime } from './server.js';
-import { createInterface } from 'node:readline/promises';
 import path from 'node:path';
-import { describePortOwner, findAvailablePort, isWorkspaceRecordActive, readWorkspaceRegistry, resolveWorkspaceInput, terminatePortOwner, workspaceChoiceHint } from './instances.js';
+import { describePortOwner, findAvailablePort, isWorkspaceRecordActive, readWorkspaceRegistry, terminatePortOwner } from './instances.js';
 import type { RuntimeReconfigure } from './tui/state.js';
 import type { LiteSettings } from './types.js';
 
@@ -63,26 +62,13 @@ async function chooseWorkspace(env: NodeJS.ProcessEnv): Promise<void> {
   const current = readLiteSettings(env);
   if (!current) return;
   const records = readWorkspaceRegistry(path.dirname(settingsPath(env)));
-  const hint = workspaceChoiceHint(records);
-  const prompt = createInterface({ input: process.stdin, output: process.stdout });
-  const answer = (await prompt.question(
-    `Workspace / 工作区
-${hint || '(no saved workspaces)'}
-` +
-    `Enter path or number [default: ${current.workspaceDir}]: `,
-  )).trim();
-  let selected = answer ? resolveWorkspaceInput(answer, records) : current.workspaceDir;
+  if (!records.length) return;
+  const { runWorkspaceChooserTui } = await import('./tui/index.js');
+  const available = records.filter((record) => !isWorkspaceRecordActive(record));
+  if (!available.length) throw new Error('Every registered workspace is already active in another LocalTerminal Lite process.');
+  const selected = await runWorkspaceChooserTui(available, current.workspaceDir, current.uiLanguage === 'zh-CN');
   const active = records.find((record) => path.resolve(record.workspaceDir) === path.resolve(selected) && isWorkspaceRecordActive(record));
-  if (active) {
-    const alternative = (await prompt.question(
-      `That workspace is already served by PID ${active.lastPid} on ${active.lastHost}:${active.lastPort}.
-` +
-      'Choose another path/number, or press Enter to cancel: ',
-    )).trim();
-    if (!alternative) { prompt.close(); throw new Error('Workspace selection cancelled because the selected workspace is already active.'); }
-    selected = resolveWorkspaceInput(alternative, records);
-  }
-  prompt.close();
+  if (active) throw new Error(`Workspace is already active in PID ${active.lastPid}: ${active.workspaceDir}`);
   saveLiteSettings({ ...current, workspaceDir: selected }, env);
 }
 
@@ -96,13 +82,12 @@ async function startRuntime(env: NodeJS.ProcessEnv, interactive = false): Promis
       const detail = error as Error & { code?: string; port?: number; host?: string };
       if (!interactive || detail.code !== 'EADDRINUSE' || !detail.port) throw error;
       const owner = describePortOwner(detail.port);
-      const prompt = createInterface({ input: process.stdin, output: process.stdout });
-      const answer = (await prompt.question(
-        `Port ${detail.port} is occupied by ${owner}.
-` +
-        '[k] terminate that process  [n] use next free port  [c] cancel: ',
+      const { runChoiceTui } = await import('./tui/index.js');
+      const answer = (await runChoiceTui(
+        { label: `Port ${detail.port} is occupied by ${owner}`, fallback: 'cancel', options: ['kill', 'next', 'cancel'] },
+        ['Choose how LocalTerminal Lite should continue.'],
+        false,
       )).trim().toLowerCase();
-      prompt.close();
       if (answer === 'k' || answer === 'kill') {
         await terminatePortOwner(detail.port);
         continue;

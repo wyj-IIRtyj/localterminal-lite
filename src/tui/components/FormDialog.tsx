@@ -1,7 +1,8 @@
 import type { InputRenderable, TextareaRenderable } from '@opentui/core';
 import { useBindings } from '@opentui/keymap/react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { FormQuestion, Theme } from '../state.js';
+import { initialQuestionState, nextTextValue, optionAnswer, toggleSelectedOption } from '../form-model.js';
 import { Modal } from './Modal.js';
 
 export function FormDialog({ questions, preamble, theme, width, height, zh, onComplete, onCancel }: {
@@ -16,60 +17,38 @@ export function FormDialog({ questions, preamble, theme, width, height, zh, onCo
 }) {
   const [index, setIndex] = useState(0);
   const [answers, setAnswers] = useState<string[]>([]);
-  const [value, setValue] = useState(questions[0]?.fallback || '');
+  const initial = initialQuestionState(questions[0]);
+  const [value, setValue] = useState(initial.value);
+  const [pristine, setPristine] = useState(initial.pristine);
+  const [optionIndex, setOptionIndex] = useState(initial.optionIndex);
+  const [selectedOptions, setSelectedOptions] = useState(initial.selectedOptions);
   const [validation, setValidation] = useState<string>();
   const [validating, setValidating] = useState(false);
-  const [pristine, setPristine] = useState(true);
-  const [optionIndex, setOptionIndex] = useState(() => Math.max(0, questions[0]?.options?.indexOf(questions[0]?.fallback || '') ?? 0));
-  const [selectedOptions, setSelectedOptions] = useState<string[]>(() => questions[0]?.multiSelect && questions[0]?.fallback ? questions[0].fallback.split(',').map((item) => item.trim()).filter(Boolean) : []);
-  const valueRef = useRef(value);
+  const valueRef = useRef(initial.value);
+  const optionIndexRef = useRef(initial.optionIndex);
+  const selectedOptionsRef = useRef(initial.selectedOptions);
   const inputRef = useRef<InputRenderable>(null);
   const textareaRef = useRef<TextareaRenderable>(null);
   const question = questions[index];
   const options = question?.options || [];
   const labels = question?.optionLabels || options;
 
-  const resetForQuestion = (nextIndex: number) => {
-    const nextQuestion = questions[nextIndex];
-    const nextValue = nextQuestion?.fallback || '';
-    setValue(nextValue);
-    valueRef.current = nextValue;
-    setPristine(true);
+  const applyQuestionState = (nextIndex: number) => {
+    const state = initialQuestionState(questions[nextIndex]);
+    valueRef.current = state.value;
+    optionIndexRef.current = state.optionIndex;
+    selectedOptionsRef.current = state.selectedOptions;
+    setValue(state.value);
+    setPristine(state.pristine);
+    setOptionIndex(state.optionIndex);
+    setSelectedOptions(state.selectedOptions);
     setValidation(undefined);
-    const fallbackIndex = nextQuestion?.options?.indexOf(nextQuestion.fallback || '') ?? -1;
-    setOptionIndex(Math.max(0, fallbackIndex));
-    setSelectedOptions(nextQuestion?.multiSelect && nextQuestion.fallback ? nextQuestion.fallback.split(',').map((item) => item.trim()).filter(Boolean) : []);
   };
 
-  useBindings(() => ({
-    priority: 400,
-    bindings: [
-      { key: 'escape', cmd: () => { onCancel(); return true; } },
-      { key: 'ctrl+c', cmd: () => { onCancel(); return true; } },
-      { key: 'ctrl+u', cmd: () => { if (!question?.options) { setValue(''); valueRef.current = ''; setPristine(false); } return true; } },
-      ...(!question?.options ? [] : [
-        { key: 'left', cmd: () => { setOptionIndex((current) => (current + options.length - 1) % options.length); return true; } },
-        { key: 'right', cmd: () => { setOptionIndex((current) => (current + 1) % options.length); return true; } },
-        { key: 'up', cmd: () => { setOptionIndex((current) => (current + options.length - 1) % options.length); return true; } },
-        { key: 'down', cmd: () => { setOptionIndex((current) => (current + 1) % options.length); return true; } },
-        ...(question.multiSelect ? [{ key: 'space', cmd: () => { const option = options[optionIndex]; setSelectedOptions((current) => current.includes(option) ? current.filter((item) => item !== option) : [...current, option]); return true; } }] : []),
-        { key: 'return', cmd: () => { void submit(question.multiSelect ? selectedOptions.join(',') : options[optionIndex] || question.fallback || ''); return true; } },
-      ]),
-    ],
-  }), [onCancel, question, options, optionIndex]);
-
-  useEffect(() => {
-    if (question?.multiline) textareaRef.current?.focus();
-    else if (!question?.options) inputRef.current?.focus();
-  }, [index, question?.multiline, question?.options]);
-
-  if (!question) return null;
-  const questionLabel = typeof question.label === 'function' ? question.label(answers) : question.label;
-
   const submit = async (raw: string) => {
-    const answer = raw.trim() || question.fallback || '';
+    const answer = raw.trim() || question?.fallback || '';
     setValidation(undefined);
-    if (question.validate) {
+    if (question?.validate) {
       setValidating(true);
       const issue = await question.validate(answer, answers);
       setValidating(false);
@@ -80,14 +59,49 @@ export function FormDialog({ questions, preamble, theme, width, height, zh, onCo
     const nextIndex = index + 1;
     setAnswers(next);
     setIndex(nextIndex);
-    resetForQuestion(nextIndex);
+    applyQuestionState(nextIndex);
   };
 
-  const optionAnswer = useMemo(() => {
-    if (!question?.options) return '';
-    if (question.multiSelect) return selectedOptions.join(',');
-    return options[optionIndex] || question.fallback || '';
-  }, [question, selectedOptions, options, optionIndex]);
+  const moveOption = (delta: number) => {
+    if (!options.length) return;
+    const next = (optionIndexRef.current + options.length + delta) % options.length;
+    optionIndexRef.current = next;
+    setOptionIndex(next);
+  };
+
+  const toggleCurrent = () => {
+    const option = options[optionIndexRef.current];
+    if (!option) return;
+    const next = toggleSelectedOption(selectedOptionsRef.current, option);
+    selectedOptionsRef.current = next;
+    setSelectedOptions(next);
+  };
+
+  useBindings(() => ({
+    priority: 400,
+    bindings: [
+      { key: 'escape', cmd: () => { onCancel(); return true; } },
+      { key: 'ctrl+c', cmd: () => { onCancel(); return true; } },
+      { key: 'ctrl+u', cmd: () => { if (!question?.options) { valueRef.current = ''; setValue(''); setPristine(false); } return true; } },
+      ...(!question?.options ? [] : [
+        { key: 'left', cmd: () => { moveOption(-1); return true; } },
+        { key: 'up', cmd: () => { moveOption(-1); return true; } },
+        { key: 'right', cmd: () => { moveOption(1); return true; } },
+        { key: 'down', cmd: () => { moveOption(1); return true; } },
+        ...(question.multiSelect ? [{ key: 'space', cmd: () => { toggleCurrent(); return true; } }] : []),
+        { key: 'return', cmd: () => { void submit(optionAnswer(question, optionIndexRef.current, selectedOptionsRef.current)); return true; } },
+      ]),
+    ],
+  }), [onCancel, question, answers, index, options]);
+
+  useEffect(() => {
+    if (question?.multiline) textareaRef.current?.focus();
+    else if (!question?.options) inputRef.current?.focus();
+  }, [index, question?.multiline, question?.options]);
+
+  if (!question) return null;
+  const questionLabel = typeof question.label === 'function' ? question.label(answers) : question.label;
+  const columnOptions = question.optionsLayout === 'column';
 
   return (
     <Modal title={zh ? '输入' : 'Input'} theme={theme} width={width} height={height}>
@@ -105,17 +119,21 @@ export function FormDialog({ questions, preamble, theme, width, height, zh, onCo
         <box flexDirection="column" flexShrink={0} marginTop={1}>
           <text fg={theme.accent} wrapMode="word"><b>{index + 1}/{questions.length} · {questionLabel}</b></text>
           {question.options ? (
-            <box flexDirection="row" flexWrap="wrap" gap={1} marginTop={1}>
-              {options.map((option, optionPosition) => {
-                const active = optionPosition === optionIndex;
+            <box flexDirection={columnOptions ? 'column' : 'row'} flexWrap={columnOptions ? 'no-wrap' : 'wrap'} gap={1} marginTop={1}>
+              {options.map((option, position) => {
+                const active = position === optionIndex;
                 const selected = question.multiSelect ? selectedOptions.includes(option) : active;
                 return (
-                  <box key={option} paddingLeft={1} paddingRight={1} backgroundColor={active ? theme.selected : theme.panelAlt} onMouseDown={() => {
-                    setOptionIndex(optionPosition);
-                    if (question.multiSelect) setSelectedOptions((current) => current.includes(option) ? current.filter((item) => item !== option) : [...current, option]);
-                    else void submit(option);
+                  <box key={option} flexDirection="column" width={columnOptions ? '100%' : undefined} paddingLeft={1} paddingRight={1} backgroundColor={active ? theme.selected : theme.panelAlt} onMouseDown={() => {
+                    optionIndexRef.current = position;
+                    setOptionIndex(position);
+                    if (question.multiSelect) {
+                      const next = toggleSelectedOption(selectedOptionsRef.current, option);
+                      selectedOptionsRef.current = next;
+                      setSelectedOptions(next);
+                    } else void submit(option);
                   }}>
-                    <text fg={active ? theme.selectedText : selected ? theme.good : theme.text}>{question.multiSelect ? `${selected ? '✓' : '○'} ${labels[optionPosition] || option}` : labels[optionPosition] || option}</text>
+                    <text fg={active ? theme.selectedText : selected ? theme.good : theme.text} wrapMode="word">{question.multiSelect ? `${selected ? '✓' : '○'} ${labels[position] || option}` : labels[position] || option}</text>
                   </box>
                 );
               })}
@@ -149,10 +167,10 @@ export function FormDialog({ questions, preamble, theme, width, height, zh, onCo
               textColor={theme.text}
               focusedTextColor={theme.selectedText}
               cursorColor={theme.accent}
-              onInput={(next) => {
-                const normalized = pristine && value && next.startsWith(value) ? next.slice(value.length) : next;
-                valueRef.current = normalized;
-                setValue(normalized);
+              onInput={(incoming) => {
+                const next = nextTextValue(valueRef.current, incoming, pristine);
+                valueRef.current = next;
+                setValue(next);
                 setPristine(false);
               }}
               onSubmit={() => void submit(inputRef.current?.value || valueRef.current)}
@@ -162,7 +180,7 @@ export function FormDialog({ questions, preamble, theme, width, height, zh, onCo
           {validation ? <text fg={theme.bad} wrapMode="word">{validation}</text> : null}
           {validating ? <text fg={theme.warn}>{zh ? '正在校验…' : 'Validating…'}</text> : null}
           <text fg={theme.muted}>{question.options
-            ? (question.multiSelect ? (zh ? '←/→ 选择 · Space 勾选 · Enter 确认 · 鼠标点击切换' : '←/→ choose · Space toggle · Enter confirm · click to toggle') : (zh ? '←/→ 选择 · Enter 确认 · 鼠标点击' : '←/→ choose · Enter confirm · click'))
+            ? (question.multiSelect ? (zh ? '方向键选择 · Space 勾选 · Enter 确认 · 鼠标点击切换' : 'Arrows choose · Space toggle · Enter confirm · click to toggle') : (zh ? '方向键选择 · Enter 确认 · 鼠标点击' : 'Arrows choose · Enter confirm · click'))
             : question.multiline
               ? (zh ? 'Ctrl+Enter 下一步 · Ctrl+U 清空 · Esc 取消' : 'Ctrl+Enter next · Ctrl+U clear · Esc cancel')
               : (zh ? 'Enter 下一步 · Ctrl+U 清空 · Esc 取消' : 'Enter next · Ctrl+U clear · Esc cancel')}</text>
