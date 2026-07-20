@@ -31,6 +31,7 @@ export class PortClusterRegistry {
   readonly memberId = `${process.pid}-${randomBytes(6).toString('hex')}`;
   private readonly file: string;
   private readonly lock: string;
+  private localMember?: ClusterMember;
 
   constructor(private readonly configDir: string, readonly host: string, readonly port: number) {
     const dir = path.join(configDir, 'clusters');
@@ -40,10 +41,12 @@ export class PortClusterRegistry {
   }
 
   read(): ClusterState {
-    try {
-      const value = JSON.parse(readFileSync(this.file, 'utf8')) as ClusterState;
-      return { schemaVersion: 1, host: this.host, port: this.port, leaderId: value.leaderId, members: Array.isArray(value.members) ? value.members : [] };
-    } catch { return { schemaVersion: 1, host: this.host, port: this.port, members: [] }; }
+    if (!existsSync(this.file)) return { schemaVersion: 1, host: this.host, port: this.port, members: [] };
+    const value = JSON.parse(readFileSync(this.file, 'utf8')) as ClusterState;
+    if (!value || value.schemaVersion !== 1 || !Array.isArray(value.members)) {
+      throw new Error(`Invalid cluster registry: ${this.file}`);
+    }
+    return { schemaVersion: 1, host: this.host, port: this.port, leaderId: value.leaderId, members: value.members };
   }
 
   update(mutator: (state: ClusterState) => ClusterState): ClusterState {
@@ -87,11 +90,31 @@ export class PortClusterRegistry {
       if (incompatible) throw new Error(`Port ${this.port} is already used by a LocalTerminal Lite cluster with different credentials.`);
       return { ...state, members: [...state.members.filter((item) => item.id !== record.id), record] };
     });
+    this.localMember = record;
     return record;
   }
 
   heartbeat(): void {
-    this.update((state) => ({ ...state, members: state.members.map((item) => item.id === this.memberId ? { ...item, heartbeatAt: new Date().toISOString() } : item) }));
+    if (!this.localMember) throw new Error('Cluster member has not been registered.');
+    const refreshed = { ...this.localMember, heartbeatAt: new Date().toISOString() };
+    this.update((state) => ({
+      ...state,
+      members: [...state.members.filter((item) => item.id !== this.memberId), refreshed],
+    }));
+    this.localMember = refreshed;
+  }
+
+  /**
+   * Repair the local membership invariant after a missing or externally
+   * truncated registry. This persists the actual member record; callers never
+   * synthesize a display-only count.
+   */
+  ensureRegistered(): ClusterState {
+    if (!this.localMember) throw new Error('Cluster member has not been registered.');
+    const current = this.read();
+    if (current.members.some((item) => item.id === this.memberId)) return current;
+    this.heartbeat();
+    return this.read();
   }
 
   setLeader(): void {
@@ -100,6 +123,7 @@ export class PortClusterRegistry {
 
   unregister(): void {
     this.update((state) => ({ ...state, leaderId: state.leaderId === this.memberId ? undefined : state.leaderId, members: state.members.filter((item) => item.id !== this.memberId) }));
+    this.localMember = undefined;
   }
 
   private prune(state: ClusterState): ClusterState {

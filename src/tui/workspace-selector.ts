@@ -15,7 +15,7 @@ export function buildWorkspaceSelectorModel(input: {
   currentRuntime?: CurrentWorkspaceRuntime;
   zh: boolean;
 }): WorkspaceSelectorModel {
-  const items = workspaceSelectionItems(input.records, input.currentRuntime, input.zh);
+  const items = workspaceSelectionItems(input.records, input.currentRuntime, input.zh, true);
   return {
     items,
     question: workspaceChoiceQuestion(

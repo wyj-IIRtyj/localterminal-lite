@@ -4,9 +4,9 @@ import { WorkspaceDiffTracker, type DiffSnapshot } from '../diff.js';
 import { logicalSessionGroups } from '../tui-model.js';
 import type { LiteRuntime, RuntimeLog } from '../server.js';
 import type { CustomExtensionSpec, LiteSession, LiteSettings, SessionPhase, StoredState, TaskPackage } from '../types.js';
-import { isValidPublicBaseUrl, maskCredential, readLiteSettings, rotateLiteCredentials, validateSettingsFeasibility } from '../config.js';
+import { isDirectory, isValidPublicBaseUrl, maskCredential, readLiteSettings, rotateLiteCredentials, validateSettingsFeasibility } from '../config.js';
 import { describePortOwner, findAvailablePort, terminatePortOwner } from '../instances.js';
-import { selectedWorkspace } from '../workspace-selection.js';
+import { isAddWorkspaceSelection, selectedWorkspace } from '../workspace-selection.js';
 import { buildWorkspaceSelectorModel } from './workspace-selector.js';
 import { checkForUpdate, installUpdate, isSourceCheckout, type UpdateStatus } from '../update.js';
 import { commandPassiveLock, passiveLockStatus } from '../session-resources.js';
@@ -357,6 +357,23 @@ export class TuiController {
     }
     const answers = await ask(questions, [this.text(`Editing: ${fields.join(', ')}`, `正在修改：${fields.join(', ')}`)]);
     if (!answers) return;
+    let addedWorkspaceDir: string | undefined;
+    const workspaceFieldIndex = fields.indexOf('workspace');
+    if (workspaceFieldIndex >= 0) {
+      const selected = selectedWorkspace(workspaceItems, answers[workspaceFieldIndex]);
+      if (!selected) throw new Error('Workspace selection did not resolve to a catalog entry.');
+      if (isAddWorkspaceSelection(selected)) {
+        const pathAnswer = await ask([{
+          label: this.text('New workspace path', '新的工作区路径'),
+          fallback: current.workspaceDir,
+          validate: (value) => isDirectory(value)
+            ? undefined
+            : this.text('Workspace must be an accessible directory.', '工作区必须是可访问的目录。'),
+        }], [this.text('Enter the directory to add and open.', '输入要添加并打开的目录。')]);
+        if (!pathAnswer) return;
+        addedWorkspaceDir = pathAnswer[0];
+      }
+    }
     const next: LiteSettings = { ...current };
     let passiveAction: 'off' | 'arm' | 'standby' | undefined;
     fields.forEach((field, index) => {
@@ -366,7 +383,7 @@ export class TuiController {
       else if (field === 'workspace') {
         const selected = selectedWorkspace(workspaceItems, value);
         if (!selected) throw new Error('Workspace selection did not resolve to a catalog entry.');
-        next.workspaceDir = selected.workspaceDir;
+        next.workspaceDir = isAddWorkspaceSelection(selected) ? addedWorkspaceDir! : selected.workspaceDir;
       }
       else if (field === 'host') next.host = value;
       else if (field === 'port') next.port = integer(value, current.port);

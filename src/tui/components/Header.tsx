@@ -3,12 +3,16 @@ import type { Theme } from '../state.js';
 
 export function Header({ runtime, theme, pending, zh }: { runtime: LiteRuntime; theme: Theme; pending: number; zh: boolean }) {
   const topology = runtime.processTopology();
-  const role = topology.role === 'leader' ? (zh ? '主进程' : 'leader') : (zh ? '成员进程' : 'member');
+  const status = topology.mode === 'degraded'
+    ? (zh ? `拓扑异常 · :${topology.sharedPort} · PID ${topology.pid}` : `topology degraded · :${topology.sharedPort} · PID ${topology.pid}`)
+    : topology.mode === 'single-workspace'
+      ? (zh ? `单工作区模式 · :${topology.sharedPort} · PID ${topology.pid}` : `single-workspace mode · :${topology.sharedPort} · PID ${topology.pid}`)
+      : `${topology.memberCount} ${zh ? '个终端进程共用' : 'terminal process(es) share'} :${topology.sharedPort} · ${topology.role === 'leader' ? (zh ? '主进程' : 'leader') : (zh ? '成员进程' : 'member')} · PID ${topology.pid}`;
   return (
     <box flexDirection="column" flexShrink={0} backgroundColor={theme.background}>
       <box flexDirection="row" gap={2} paddingLeft={1} paddingRight={1}>
         <text fg={theme.accent}><b>LocalTerminal Lite</b></text>
-        <text fg={theme.good}>● {zh ? '运行中' : 'running'} · {topology.memberCount} {zh ? '个终端进程共用' : 'terminal process(es) share'} :{topology.sharedPort} · {role} · PID {topology.pid}</text>
+        <text fg={topology.mode === 'degraded' ? theme.bad : theme.good}>● {zh ? '运行中' : 'running'} · {status}</text>
         <text fg={theme.muted}>v1.0.1</text>
       </box>
       {pending > 0 ? (

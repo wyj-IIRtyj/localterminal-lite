@@ -8,6 +8,8 @@ export type CurrentWorkspaceRuntime = {
   pid?: number;
 };
 
+export const ADD_WORKSPACE_ID = '__add_workspace__';
+
 export type WorkspaceSelectionItem = {
   id: string;
   title: string;
@@ -26,8 +28,9 @@ export function workspaceSelectionItems(
   records: WorkspaceRecord[],
   current: CurrentWorkspaceRuntime | undefined,
   zh: boolean,
+  includeAdd = false,
 ): WorkspaceSelectionItem[] {
-  return records.map((record) => {
+  const items = records.map((record) => {
     const isCurrent = Boolean(current && sameWorkspace(record.workspaceDir, current.workspaceDir));
     const activeElsewhere = !isCurrent && isWorkspaceRecordActive(record);
     const host = isCurrent ? current!.host : (record.lastHost || '127.0.0.1');
@@ -49,6 +52,18 @@ export function workspaceSelectionItems(
       disabled: activity === 'active',
     };
   });
+  if (includeAdd) {
+    items.push({
+      id: ADD_WORKSPACE_ID,
+      title: zh ? '添加新的工作区…' : 'Add a new workspace…',
+      workspaceDir: '',
+      status: zh ? '输入一个新的目录路径' : 'Enter a new directory path',
+      activity: 'inactive',
+      active: false,
+      disabled: false,
+    });
+  }
+  return items;
 }
 
 export function workspaceSelectionIndex(items: WorkspaceSelectionItem[], workspaceDir: string): number {
@@ -59,4 +74,8 @@ export function workspaceSelectionIndex(items: WorkspaceSelectionItem[], workspa
 export function selectedWorkspace(items: WorkspaceSelectionItem[], answer: string): WorkspaceSelectionItem | undefined {
   const index = Number(answer.trim());
   return Number.isInteger(index) && index >= 1 && index <= items.length ? items[index - 1] : undefined;
+}
+
+export function isAddWorkspaceSelection(item: WorkspaceSelectionItem | undefined): boolean {
+  return item?.id === ADD_WORKSPACE_ID;
 }

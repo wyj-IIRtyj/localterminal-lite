@@ -3,7 +3,7 @@ import { useTerminalDimensions } from '@opentui/react';
 import { useState } from 'react';
 import { validateSettings, validateSettingsFeasibility } from '../config.js';
 import { describePortOwner, findAvailablePort, resolveWorkspaceInput, terminatePortOwner, type WorkspaceRecord } from '../instances.js';
-import { selectedWorkspace } from '../workspace-selection.js';
+import { isAddWorkspaceSelection, selectedWorkspace } from '../workspace-selection.js';
 import type { LiteSettings } from '../types.js';
 import { themeFor, type FormQuestion } from './state.js';
 import { FormDialog } from './components/FormDialog.js';
@@ -39,6 +39,20 @@ export function Setup({ defaults, records, onComplete, onCancel }: { defaults: L
     knownWorkspaces.length
       ? workspaceSelector.question
       : { label: '工作区路径 / Workspace path', fallback: defaults.workspaceDir, validate: (value) => { try { return path.resolve(value) ? undefined : 'Invalid workspace.'; } catch { return 'Invalid workspace.'; } } },
+    {
+      label: (previous) => {
+        const selected = selectedWorkspace(workspaceItems, previous[2] || '');
+        return isAddWorkspaceSelection(selected)
+          ? '新的工作区路径 / New workspace path'
+          : '工作区路径确认 / Workspace path confirmation';
+      },
+      fallback: '',
+      validate: (value, previous) => {
+        const selected = selectedWorkspace(workspaceItems, previous[2] || '');
+        if (!isAddWorkspaceSelection(selected)) return undefined;
+        return value.trim() && path.resolve(value) ? undefined : 'Workspace path is required.';
+      },
+    },
     { label: '监听地址 / Host', fallback: defaults.host },
     { label: '端口 / Port', fallback: String(defaults.port), validate: (value) => { const port = Number(value); return Number.isInteger(port) && port >= 0 && port <= 65535 ? undefined : 'Port must be 0-65535.'; } },
     { label: '公网 HTTPS URL / Public URL (optional)', fallback: defaults.publicBaseUrl },
@@ -62,17 +76,21 @@ export function Setup({ defaults, records, onComplete, onCancel }: { defaults: L
       }
       return;
     }
-    if (!['yes', 'y'].includes(answers[8].toLowerCase())) { setAttempt((value) => value + 1); return; }
+    if (!['yes', 'y'].includes(answers[9].toLowerCase())) { setAttempt((value) => value + 1); return; }
     const candidate: LiteSettings = {
       ...defaults,
       uiLanguage: answers[0] as LiteSettings['uiLanguage'],
       uiTheme: answers[1] as LiteSettings['uiTheme'],
-      workspaceDir: selectedWorkspace(workspaceItems, answers[2])?.workspaceDir || resolveWorkspaceInput(answers[2], knownWorkspaces),
-      host: answers[3],
-      port: integer(answers[4], defaults.port),
-      publicBaseUrl: answers[5].replace(/\/$/, ''),
-      maxOutputChars: integer(answers[6], defaults.maxOutputChars),
-      commandTimeoutSec: integer(answers[7], defaults.commandTimeoutSec),
+      workspaceDir: (() => {
+        const selected = selectedWorkspace(workspaceItems, answers[2]);
+        if (isAddWorkspaceSelection(selected)) return answers[3];
+        return selected?.workspaceDir || resolveWorkspaceInput(answers[2], knownWorkspaces);
+      })(),
+      host: answers[4],
+      port: integer(answers[5], defaults.port),
+      publicBaseUrl: answers[6].replace(/\/$/, ''),
+      maxOutputChars: integer(answers[7], defaults.maxOutputChars),
+      commandTimeoutSec: integer(answers[8], defaults.commandTimeoutSec),
     };
     const errors = validateSettings(candidate);
     if (errors.length) {

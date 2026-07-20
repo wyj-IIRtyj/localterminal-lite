@@ -17,9 +17,9 @@ import { createDefaultSettings, loadLiteConfig, readLiteSettings, saveLiteSettin
 import { activeWorkspaceRuntimePids, appendWorkspaceLog, findAvailablePort, readWorkspaceLogs, readWorkspaceRegistry, resolveWorkspaceInput, upsertWorkspaceRecord, workspaceChoiceHint, workspaceId } from '../dist/instances.js';
 import { migrateWorkspaceState } from '../dist/migration.js';
 import { checkForUpdate, isNewerVersion } from '../dist/update.js';
-import { PortClusterRegistry, tokenHash } from '../dist/cluster.js';
+import { clusterKey, PortClusterRegistry, tokenHash } from '../dist/cluster.js';
 import { disarmAllSessionResources, disarmSessionResources, passiveLockStatus } from '../dist/session-resources.js';
-import { selectedWorkspace, workspaceSelectionIndex, workspaceSelectionItems } from '../dist/workspace-selection.js';
+import { ADD_WORKSPACE_ID, isAddWorkspaceSelection, selectedWorkspace, workspaceSelectionIndex, workspaceSelectionItems } from '../dist/workspace-selection.js';
 import { runtimeSettingsSnapshot } from '../dist/runtime-settings.js';
 import { buildWorkspaceSelectorModel } from '../dist/tui/workspace-selector.js';
 import { WorkspaceCatalog } from '../dist/workspace-catalog.js';
@@ -510,8 +510,8 @@ test('workspace runtime leases follow repeated switches and never leak to previo
     const settings = buildWorkspaceSelectorModel({ label: '工作区', records, currentWorkspaceDir: dirs[0].workspaceDir, currentRuntime: { workspaceDir: dirs[0].workspaceDir, host: '127.0.0.1', port: 3101, pid: process.pid }, zh: true });
     assert.deepEqual(startup.question.optionLabels, settings.question.optionLabels);
     assert.deepEqual(startup.question.optionDescriptions, settings.question.optionDescriptions);
-    assert.equal(new Set(startup.question.optionLabels).size, 3);
-    assert.deepEqual(startup.question.optionLabels, ['A', 'B', 'C']);
+    assert.equal(new Set(startup.question.optionLabels).size, 4);
+    assert.deepEqual(startup.question.optionLabels, ['A', 'B', 'C', '添加新的工作区…']);
     assert.ok(startup.items.every((item) => item.activity === 'inactive'));
     assert.equal(settings.items[0].activity, 'current');
     assert.ok(settings.items.slice(1).every((item) => item.activity === 'inactive'));
@@ -594,6 +594,16 @@ test('workspace selection uses one runtime-aware model across startup and settin
   }
 });
 
+test('workspace selector always exposes an explicit add-new action', () => {
+  const records = [{ id: 'one', workspaceDir: '/tmp/one', stateDir: '/tmp/state-one', lastSeenAt: new Date().toISOString() }];
+  const items = workspaceSelectionItems(records, undefined, true, true);
+  assert.equal(items.length, 2);
+  assert.equal(items[1].id, ADD_WORKSPACE_ID);
+  assert.equal(isAddWorkspaceSelection(items[1]), true);
+  assert.match(items[1].title, /添加新的工作区/);
+  assert.equal(items[1].disabled, false);
+});
+
 test('credential reveal fails closed on every release packet', () => {
   assert.equal(nextCredentialVisibility(false, { name: 'v', eventType: 'press' }, true), true);
   assert.equal(nextCredentialVisibility(true, { name: '', eventType: 'release' }, true), false);
@@ -615,6 +625,34 @@ test('workspace cards render status as an independent badge and require explicit
   assert.match(formDialog, /descriptions\[position\]/);
 });
 
+test('cluster heartbeat restores a missing local member instead of persisting an empty registry', () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-cluster-self-heal-'));
+  const port = 39991;
+  try {
+    const registry = new PortClusterRegistry(configDir, '127.0.0.1', port);
+    const member = registry.register({
+      pid: process.pid,
+      appVersion: '1.1.0',
+      protocolVersion: 1,
+      workspaceId: 'workspace-one',
+      workspaceDir: '/tmp/workspace-one',
+      internalPort: 41001,
+      connectorKey: CONNECTOR_KEY,
+      actionsTokenHash: tokenHash(ACTIONS_TOKEN),
+      secret: 'cluster-secret',
+    });
+    const registryFile = path.join(configDir, 'clusters', `${clusterKey('127.0.0.1', port)}.json`);
+    fs.rmSync(registryFile, { force: true });
+    registry.heartbeat();
+    const state = JSON.parse(fs.readFileSync(registryFile, 'utf8'));
+    assert.equal(state.members.length, 1);
+    assert.equal(state.members[0].id, member.id);
+    assert.equal(state.members[0].workspaceId, 'workspace-one');
+  } finally {
+    fs.rmSync(configDir, { recursive: true, force: true });
+  }
+});
+
 test('process topology reports shared-port member count and leader role', async () => {
   const port = await findAvailablePort('127.0.0.1', 39000);
   const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-topology-config-'));
@@ -634,6 +672,55 @@ test('process topology reports shared-port member count and leader role', async 
     assert.ok(topology.every((item) => item.sharedPort === port));
   } finally {
     for (const runtime of runtimes.reverse()) await runtime.close();
+    fs.rmSync(configDir, { recursive: true, force: true });
+  }
+});
+
+test('single configured-port runtime uses single-workspace mode and repairs a deleted registry', async () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-topology-gap-'));
+  const workspaceDir = path.join(configDir, 'workspace');
+  const stateDir = path.join(configDir, 'state');
+  const port = await findAvailablePort('127.0.0.1', 39500);
+  fs.mkdirSync(workspaceDir, { recursive: true });
+  const runtime = new LiteRuntime({ workspaceDir, stateDir, settingsPath: path.join(configDir, 'settings.json'), host: '127.0.0.1', port, connectorKey: CONNECTOR_KEY, actionsToken: ACTIONS_TOKEN, publicBaseUrl: '', maxOutputChars: 20_000, commandTimeoutSec: 10, uiLanguage: 'zh-CN', uiTheme: 'dark', passiveLockEnabled: false });
+  try {
+    await runtime.start();
+    const first = runtime.processTopology();
+    assert.equal(first.mode, 'single-workspace');
+    assert.equal(first.memberCount, 1);
+    assert.equal(first.role, 'standalone');
+    const registryFile = path.join(configDir, 'clusters', `${clusterKey('127.0.0.1', port)}.json`);
+    fs.rmSync(registryFile, { force: true });
+    const repaired = runtime.processTopology();
+    assert.equal(repaired.mode, 'single-workspace');
+    assert.equal(repaired.memberCount, 1);
+    const state = JSON.parse(fs.readFileSync(registryFile, 'utf8'));
+    assert.equal(state.members.length, 1);
+    assert.equal(state.members[0].workspaceDir, workspaceDir);
+  } finally {
+    await runtime.close();
+    fs.rmSync(configDir, { recursive: true, force: true });
+  }
+});
+
+test('malformed cluster registry is reported as degraded and never as zero members', async () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-topology-corrupt-'));
+  const workspaceDir = path.join(configDir, 'workspace');
+  const stateDir = path.join(configDir, 'state');
+  const port = await findAvailablePort('127.0.0.1', 39600);
+  fs.mkdirSync(workspaceDir, { recursive: true });
+  const runtime = new LiteRuntime({ workspaceDir, stateDir, settingsPath: path.join(configDir, 'settings.json'), host: '127.0.0.1', port, connectorKey: CONNECTOR_KEY, actionsToken: ACTIONS_TOKEN, publicBaseUrl: '', maxOutputChars: 20_000, commandTimeoutSec: 10, uiLanguage: 'zh-CN', uiTheme: 'dark', passiveLockEnabled: false });
+  try {
+    await runtime.start();
+    const registryFile = path.join(configDir, 'clusters', `${clusterKey('127.0.0.1', port)}.json`);
+    fs.writeFileSync(registryFile, '{broken');
+    const topology = runtime.processTopology();
+    assert.equal(topology.mode, 'degraded');
+    assert.equal(topology.memberCount, undefined);
+    assert.match(topology.error, /JSON|Unexpected|position/i);
+  } finally {
+    fs.rmSync(path.join(configDir, 'clusters', `${clusterKey('127.0.0.1', port)}.json`), { force: true });
+    await runtime.close();
     fs.rmSync(configDir, { recursive: true, force: true });
   }
 });

@@ -5,7 +5,8 @@ import { createRoot, type Root } from '@opentui/react';
 import { createElement } from 'react';
 import type { LiteRuntime } from '../server.js';
 import type { WorkspaceRecord } from '../instances.js';
-import { selectedWorkspace } from '../workspace-selection.js';
+import { isDirectory } from '../config.js';
+import { isAddWorkspaceSelection, selectedWorkspace } from '../workspace-selection.js';
 import type { LiteSettings } from '../types.js';
 import { App } from './App.js';
 import { Setup } from './Setup.js';
@@ -74,9 +75,26 @@ export async function runWorkspaceChooserTui(records: WorkspaceRecord[], current
         zh,
         onComplete: (answers: string[]) => {
           const selected = selectedWorkspace(items, answers[0]);
-          if (!selected) reject(new Error('Invalid workspace selection.'));
-          else if (selected.disabled) reject(new Error(`Workspace is already active: ${selected.workspaceDir}`));
-          else resolve(selected.workspaceDir);
+          if (!selected) { reject(new Error('Invalid workspace selection.')); return; }
+          if (selected.disabled) { reject(new Error(`Workspace is already active: ${selected.workspaceDir}`)); return; }
+          if (!isAddWorkspaceSelection(selected)) { resolve(selected.workspaceDir); return; }
+          root?.unmount();
+          root = renderWithKeymap(renderer, createElement(FormDialog, {
+            questions: [{
+              label: zh ? '新的工作区路径' : 'New workspace path',
+              fallback: currentWorkspaceDir,
+              validate: (value: string) => isDirectory(value)
+                ? undefined
+                : (zh ? '工作区必须是可访问的目录。' : 'Workspace must be an accessible directory.'),
+            }],
+            preamble: [zh ? '输入要添加并打开的目录。' : 'Enter the directory to add and open.'],
+            theme: themeFor('dark'),
+            width: renderer.width,
+            height: renderer.height,
+            zh,
+            onComplete: (pathAnswers: string[]) => resolve(pathAnswers[0]),
+            onCancel: () => resolve(undefined),
+          }));
         },
         onCancel: () => resolve(undefined),
       }));

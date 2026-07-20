@@ -66,23 +66,56 @@ export class LiteRuntime {
 
   clusterVersions(): string[] {
     if (!this.cluster) return [CURRENT_VERSION];
-    return [...new Set(this.cluster.read().members.map((item) => item.appVersion))].sort();
+    const state = this.cluster.ensureRegistered();
+    return [...new Set(state.members.filter((item) => {
+      try { process.kill(item.pid, 0); return true; } catch { return false; }
+    }).map((item) => item.appVersion))].sort();
   }
 
   clusterMemberCount(): number {
-    return this.cluster?.read().members.length || 1;
+    const topology = this.processTopology();
+    if (topology.mode === 'degraded' || topology.memberCount === undefined) {
+      throw new Error(topology.error || 'Cluster topology is unavailable.');
+    }
+    return topology.memberCount;
   }
 
-  /** Return the process topology shown by the TUI and health diagnostics. */
-  processTopology(): { sharedPort: number; memberCount: number; role: 'leader' | 'member'; pid: number } {
-    if (!this.cluster) return { sharedPort: this.port, memberCount: 1, role: 'leader', pid: process.pid };
-    const state = this.cluster.read();
-    return {
-      sharedPort: state.port,
-      memberCount: state.members.length,
-      role: state.leaderId === this.cluster.memberId ? 'leader' : 'member',
-      pid: process.pid,
-    };
+  /** Return persisted process topology after enforcing local membership. */
+  processTopology(): {
+    mode: 'single-workspace' | 'shared-port' | 'degraded';
+    sharedPort: number;
+    memberCount?: number;
+    role: 'standalone' | 'leader' | 'member' | 'unknown';
+    pid: number;
+    error?: string;
+  } {
+    if (!this.cluster) {
+      return { mode: 'single-workspace', sharedPort: this.port, memberCount: 1, role: 'standalone', pid: process.pid };
+    }
+    try {
+      const state = this.cluster.ensureRegistered();
+      const liveMembers = state.members.filter((member) => {
+        try { process.kill(member.pid, 0); return true; } catch { return false; }
+      });
+      const local = liveMembers.find((member) => member.id === this.cluster!.memberId);
+      if (!local) throw new Error('Local cluster membership could not be restored.');
+      const isLeader = this.publicServer?.listening || state.leaderId === local.id;
+      return {
+        mode: liveMembers.length === 1 ? 'single-workspace' : 'shared-port',
+        sharedPort: state.port,
+        memberCount: liveMembers.length,
+        role: liveMembers.length === 1 ? 'standalone' : isLeader ? 'leader' : 'member',
+        pid: process.pid,
+      };
+    } catch (error) {
+      return {
+        mode: 'degraded',
+        sharedPort: this.port,
+        role: 'unknown',
+        pid: process.pid,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
   }
 
   passiveLockStatus(): ReturnType<typeof passiveLockStatus> {
@@ -148,8 +181,15 @@ export class LiteRuntime {
       Object.assign(wrapped, { code: 'EADDRINUSE', host: this.config.host, port: this.config.port, syscall: 'listen' });
       throw wrapped;
     }
-    this.heartbeatTimer = setInterval(() => { try { this.cluster?.heartbeat(); } catch { /* best effort */ } }, 1500);
-    this.electionTimer = setInterval(() => { if (!this.publicServer?.listening) void this.tryBecomeLeader(); }, 1800);
+    this.heartbeatTimer = setInterval(() => {
+      try { this.cluster?.heartbeat(); }
+      catch (error) { this.log(`Cluster heartbeat failed: ${error instanceof Error ? error.message : String(error)}`, 'error'); }
+    }, 1500);
+    this.electionTimer = setInterval(() => {
+      if (!this.publicServer?.listening) {
+        void this.tryBecomeLeader().catch((error) => this.log(`Cluster election failed: ${error instanceof Error ? error.message : String(error)}`, 'error'));
+      }
+    }, 1800);
     this.log(this.publicServer?.listening
       ? `Lite cluster leader listening on ${this.config.host}:${this.config.port}`
       : `Lite workspace joined shared port ${this.config.host}:${this.config.port} via PID ${leader?.pid}`);
