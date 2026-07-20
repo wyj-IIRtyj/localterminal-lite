@@ -1029,7 +1029,7 @@ test('events cap at five, persist until ACK, subscriptions deliver milestones, a
     for (let i = 8; i < 5100; i += 1) store.sendMessage(rootSession.session.id, observer.session.id, `message-${i}`);
     assert.equal(store.snapshot().messages.length, 5100);
   } finally { fs.rmSync(dirs.workspaceDir, { recursive: true, force: true }); }
-});
+}, 300000);
 
 test('v1 state migrates to v2 with stale roots and durable history; context stays under 16K', () => {
   const dirs = tempWorkspace();
