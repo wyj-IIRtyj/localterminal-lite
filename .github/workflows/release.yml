@@ -66,9 +66,23 @@ jobs:
       - name: Package Windows asset
         if: runner.os == 'Windows'
         run: |
-          Compress-Archive -Path "release/${{ matrix.executable }}" -DestinationPath "release/${{ matrix.asset }}"
-          $hash = (Get-FileHash -Algorithm SHA256 "release/${{ matrix.asset }}").Hash.ToLowerInvariant()
-          "$hash  ${{ matrix.asset }}" | Set-Content -Encoding Ascii "release/${{ matrix.asset }}.sha256"
+          $source = "release/${{ matrix.executable }}"
+          $archive = "release/${{ matrix.asset }}"
+          $lastError = $null
+          for ($attempt = 1; $attempt -le 10; $attempt++) {
+            try {
+              Remove-Item -LiteralPath $archive -Force -ErrorAction SilentlyContinue
+              Compress-Archive -LiteralPath $source -DestinationPath $archive -Force
+              $lastError = $null
+              break
+            } catch {
+              $lastError = $_
+              Start-Sleep -Milliseconds 750
+            }
+          }
+          if ($lastError) { throw $lastError }
+          $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          "$hash  ${{ matrix.asset }}" | Set-Content -Encoding Ascii "$archive.sha256"
         shell: powershell
       - uses: actions/upload-artifact@v4
         with:
