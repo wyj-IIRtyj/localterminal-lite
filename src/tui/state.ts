@@ -9,6 +9,7 @@ import { describePortOwner, findAvailablePort, terminatePortOwner } from '../ins
 import { isAddWorkspaceSelection, selectedWorkspace } from '../workspace-selection.js';
 import { buildWorkspaceSelectorModel } from './workspace-selector.js';
 import { checkForUpdate, installUpdate, isSourceCheckout, type UpdateStatus } from '../update.js';
+import { CURRENT_VERSION } from '../version.js';
 import { commandPassiveLock, passiveLockStatus } from '../session-resources.js';
 import { runtimeSettingsSnapshot } from '../runtime-settings.js';
 
@@ -110,7 +111,7 @@ export class TuiController {
   private readonly handoffs = new Map<string, string>();
   private readonly remindedAt = new Map<string, { sound: number; notification: number }>();
   private stopped = false;
-  private update: UpdateStatus = { currentVersion: '1.0.1', updateAvailable: false, checking: true };
+  private update: UpdateStatus = { currentVersion: CURRENT_VERSION, updateAvailable: false, checking: true };
 
   constructor(private currentRuntime: LiteRuntime, private readonly reconfigure: RuntimeReconfigure) {
     this.diff = new WorkspaceDiffTracker(currentRuntime.config);
@@ -271,12 +272,16 @@ export class TuiController {
 
   async sendMessage(ask: Ask): Promise<void> {
     const sessions = this.currentRuntime.store.listSessions().filter((session) => !['completed', 'cancelled'].includes(session.phase));
+    if (!sessions.length) {
+      this.currentRuntime.log(this.text('No active sessions are available to receive a message.', '当前没有可接收消息的活动 session。'));
+      return;
+    }
     const options = sessions.map((session) => session.id);
     const labels = sessions.map((session) => `${session.name} · ${session.role} · ${session.phase}/${session.presence}`);
     const answers = await ask([
       { label: this.text('Recipient session', '接收消息的 session'), fallback: options[0], options, optionLabels: labels },
       { label: this.text('Message from user', '用户消息'), multiline: true },
-    ], [this.text('This message is recorded as sent by the user, not impersonating any session.', '该消息会记录为用户发送，不会冒充任何 session。')]);
+    ]);
     if (answers?.[0] && answers[1]) this.currentRuntime.store.sendUserMessage(answers[0], answers[1]);
   }
 

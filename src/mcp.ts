@@ -6,6 +6,7 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import type { ExtensionService } from './extensions.js';
 import type { InvocationContext, JsonObject, ToolResponse } from './types.js';
+import { CURRENT_VERSION } from './version.js';
 
 type LiveSession = { server: McpServer; transport: StreamableHTTPServerTransport };
 
@@ -103,7 +104,7 @@ function contextFromCall(callContext: unknown): InvocationContext {
 }
 
 export function createMcpServer(service: ExtensionFacade): McpServer {
-  const server = new McpServer({ name: 'localterminal-lite', version: '1.0.1' }, {
+  const server = new McpServer({ name: 'localterminal-lite', version: CURRENT_VERSION }, {
     instructions: [
       'LocalTerminal Lite sessions are auditable work contexts, not ChatGPT conversation IDs.',
       'Before new work, call extension_discover. If multiple workspaces are listed, ask the user to choose one; never choose silently. Then create a root with session_register(mode=root, workspaceId), claim handed-off unfinished work with session_inherit(sessionId, claimCode), or reclaim the same stale session after interruption with session_inherit(sessionId, sessionToken=<previous token>).',

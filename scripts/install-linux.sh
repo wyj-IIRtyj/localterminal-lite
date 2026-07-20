@@ -7,9 +7,9 @@ install_dir="${LOCALTERMINAL_LITE_HOME:-$HOME/LocalTerminal-Lite}"
 launcher_dir="${LOCALTERMINAL_LITE_BIN_DIR:-$HOME/.local/bin}"
 
 case "$(uname -m)" in
-  arm64|aarch64) platform="darwin-arm64" ;;
-  x86_64|amd64) platform="darwin-x64" ;;
-  *) echo "Unsupported macOS architecture: $(uname -m)" >&2; exit 1 ;;
+  arm64|aarch64) platform="linux-arm64" ;;
+  x86_64|amd64) platform="linux-x64" ;;
+  *) echo "Unsupported Linux architecture: $(uname -m)" >&2; exit 1 ;;
 esac
 
 asset="localterminal-lite-${platform}.tar.gz"
@@ -31,10 +31,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-is_binary_layout() {
-  [[ -d "$install_dir/releases" && -f "$install_dir/current" ]]
-}
-
+is_binary_layout() { [[ -d "$install_dir/releases" && -f "$install_dir/current" ]]; }
 is_legacy_layout() {
   [[ -f "$install_dir/package.json" && -f "$install_dir/src/cli.ts" ]] \
     && grep -Eq '"name"[[:space:]]*:[[:space:]]*"localterminal-mcp-lite"' "$install_dir/package.json"
@@ -43,7 +40,6 @@ is_legacy_layout() {
 if [[ -e "$install_dir" ]]; then
   if [[ -d "$install_dir/.git" && "${LOCALTERMINAL_LITE_ALLOW_SOURCE_UPDATE:-0}" != "1" ]]; then
     echo "Refusing to overwrite a Git source checkout: $install_dir" >&2
-    echo "Use git pull for source checkouts, or set LOCALTERMINAL_LITE_HOME to a release installation directory." >&2
     exit 1
   fi
   if ! is_binary_layout && ! is_legacy_layout; then
@@ -60,19 +56,18 @@ fi
 mkdir -p "$temporary_dir" "$install_dir/releases" "$launcher_dir"
 curl -fL --retry 3 --retry-delay 1 "$asset_url" -o "$temporary_dir/$asset"
 curl -fL --retry 3 --retry-delay 1 "$checksum_url" -o "$temporary_dir/$asset.sha256"
-
 expected="$(awk '{print $1}' "$temporary_dir/$asset.sha256" | tr -d '\r\n')"
-actual="$(shasum -a 256 "$temporary_dir/$asset" | awk '{print $1}')"
-[[ -n "$expected" && "$expected" == "$actual" ]] || {
-  echo "SHA-256 verification failed for $asset" >&2
-  exit 1
-}
+if command -v sha256sum >/dev/null 2>&1; then
+  actual="$(sha256sum "$temporary_dir/$asset" | awk '{print $1}')"
+else
+  actual="$(shasum -a 256 "$temporary_dir/$asset" | awk '{print $1}')"
+fi
+[[ -n "$expected" && "$expected" == "$actual" ]] || { echo "SHA-256 verification failed for $asset" >&2; exit 1; }
 
 tar -xzf "$temporary_dir/$asset" -C "$temporary_dir"
 binary="$temporary_dir/localterminal-lite"
 [[ -f "$binary" ]] || { echo "Release asset does not contain localterminal-lite" >&2; exit 1; }
 chmod 755 "$binary"
-xattr -d com.apple.quarantine "$binary" 2>/dev/null || true
 
 release_dir="$install_dir/releases/$version"
 release_staging="$install_dir/releases/.${version}.staging.$$"
@@ -103,12 +98,11 @@ add_launcher_to_path() {
   printf '\n# LocalTerminal Lite command\n%s\n' "$path_line" >> "$profile_file"
 }
 case "$(basename "${SHELL:-sh}")" in
-  zsh) add_launcher_to_path "$HOME/.zprofile"; add_launcher_to_path "$HOME/.zshrc" ;;
   bash) add_launcher_to_path "$HOME/.bash_profile"; add_launcher_to_path "$HOME/.bashrc" ;;
+  zsh) add_launcher_to_path "$HOME/.zprofile"; add_launcher_to_path "$HOME/.zshrc" ;;
   *) add_launcher_to_path "$HOME/.profile" ;;
 esac
 
-# Keep the active version and one rollback version.
 find "$install_dir/releases" -mindepth 1 -maxdepth 1 -type d -name 'v*' -print0 \
   | xargs -0 ls -1dt 2>/dev/null | tail -n +3 | while IFS= read -r old; do rm -rf "$old"; done || true
 

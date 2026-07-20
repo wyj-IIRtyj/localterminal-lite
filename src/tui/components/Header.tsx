@@ -1,4 +1,5 @@
 import type { LiteRuntime } from '../../server.js';
+import { CURRENT_VERSION } from '../../version.js';
 import type { Theme } from '../state.js';
 
 export function Header({ runtime, theme, pending, zh }: { runtime: LiteRuntime; theme: Theme; pending: number; zh: boolean }) {
@@ -13,7 +14,7 @@ export function Header({ runtime, theme, pending, zh }: { runtime: LiteRuntime; 
       <box flexDirection="row" gap={2} paddingLeft={1} paddingRight={1}>
         <text fg={theme.accent}><b>LocalTerminal Lite</b></text>
         <text fg={topology.mode === 'degraded' ? theme.bad : theme.good}>● {zh ? '运行中' : 'running'} · {status}</text>
-        <text fg={theme.muted}>v1.0.1</text>
+        <text fg={theme.muted}>v{CURRENT_VERSION}</text>
       </box>
       {pending > 0 ? (
         <box backgroundColor={theme.bad} paddingLeft={1} paddingRight={1}>

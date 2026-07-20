@@ -36,13 +36,13 @@ test('bilingual documentation links resolve and private archive data is not publ
   }
 });
 
-test('stable release metadata and zero-environment installers stay pinned to v1.0.1', () => {
+test('stable release metadata and binary installers stay pinned to v1.1.0', () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-  assert.equal(pkg.version, '1.0.1');
+  assert.equal(pkg.version, '1.1.0');
   assert.equal(pkg.license, 'Apache-2.0');
-  for (const file of ['README.md', 'README.zh-CN.md', 'scripts/install-macos.sh', 'scripts/install-windows.ps1']) {
+  for (const file of ['README.md', 'README.zh-CN.md', 'RELEASE_NOTES.md', 'scripts/install-macos.sh', 'scripts/install-linux.sh', 'scripts/install-windows.ps1']) {
     const text = fs.readFileSync(path.join(root, file), 'utf8');
-    assert.match(text, /v1\.0\.1/);
+    assert.match(text, /v1\.1\.0/);
   }
 });
 
@@ -59,13 +59,20 @@ test('both READMEs explain Chat mode purpose and repeat-launch commands', () => 
   assert.match(chinese, /```text\r?\nlocalterminal-lite\r?\n```/);
 });
 
-test('installers persist a global launcher that records actual Bun and install paths', () => {
+test('binary installers use versioned releases, checksums, atomic current pointers, and stable launchers', () => {
   const mac = fs.readFileSync(path.join(root, 'scripts', 'install-macos.sh'), 'utf8');
+  const linux = fs.readFileSync(path.join(root, 'scripts', 'install-linux.sh'), 'utf8');
   const windows = fs.readFileSync(path.join(root, 'scripts', 'install-windows.ps1'), 'utf8');
-  assert.match(mac, /launcher_path="\$launcher_dir\/localterminal-lite"/);
-  assert.match(mac, /exec %q run src\/cli\.ts/);
-  assert.match(mac, /add_launcher_to_path/);
+  for (const unix of [mac, linux]) {
+    assert.match(unix, /releases\/\$version/);
+    assert.match(unix, /\.sha256/);
+    assert.match(unix, /mv "\$install_dir\/current\.tmp" "\$install_dir\/current"/);
+    assert.match(unix, /exec "\\\$root\/releases\/\\\$version\/localterminal-lite"/);
+    assert.doesNotMatch(unix, /bun install|run src\/cli\.ts/);
+  }
+  assert.match(windows, /releases/);
+  assert.match(windows, /Get-FileHash -Algorithm SHA256/);
+  assert.match(windows, /Move-Item -LiteralPath \$CurrentTmp -Destination \$CurrentPath -Force/);
   assert.match(windows, /localterminal-lite\.cmd/);
-  assert.match(windows, /SetEnvironmentVariable\("Path", \$NewUserPath, "User"\)/);
-  assert.match(windows, /run src\/cli\.ts @args/);
+  assert.doesNotMatch(windows, /bun install|run src\\cli\.ts/);
 });

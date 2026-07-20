@@ -6,6 +6,7 @@ import { copyToHostClipboard, themeFor, TABS, type Ask, type Detail, type FormQu
 import { useAppKeymap } from './keymap.js';
 import { nextCredentialVisibility } from './credential-visibility.js';
 import { Header } from './components/Header.js';
+import { FatalErrorBoundary } from './FatalErrorBoundary.js';
 import { TabBar } from './components/TabBar.js';
 import { Footer } from './components/Footer.js';
 import { FormDialog } from './components/FormDialog.js';
@@ -34,6 +35,7 @@ export function App({ controller, onExit }: { controller: TuiController; onExit:
   const [showAudit, setShowAudit] = useState(false);
   const [form, setForm] = useState<FormState>();
   const [notice, setNotice] = useState<string>();
+  const [fatalError, setFatalError] = useState<Error>();
   const [, setRevision] = useState(0);
   const scrollRef = useRef<ScrollBoxRenderable>(null);
   const exiting = useRef(false);
@@ -166,6 +168,7 @@ export function App({ controller, onExit }: { controller: TuiController; onExit:
   }), [form, tab, detail, switchTab, nextTab, back, quit, moveSelection, open, createSessionAction, sessionAction, sendMessageAction, refreshDiffAction, addExtensionAction, removeExtensionAction, configureAction, rotateCredentialsAction, updateApplicationAction, toggleAudit]);
   useAppKeymap(pageActions);
   useKeyboard((event) => {
+    if (fatalError && (event.name === 'q' || event.name === 'escape')) { void quit(); return; }
     setRevealCredentials((current) => nextCredentialVisibility(
       current,
       { name: event.name, eventType: event.eventType },
@@ -196,6 +199,7 @@ export function App({ controller, onExit }: { controller: TuiController; onExit:
 
   const scrollKey = `${tab}-${detail?.kind || 'page'}-${detail?.id || ''}`;
   return (
+    <FatalErrorBoundary runtime={runtime} theme={theme} zh={zh} onFatal={setFatalError}>
     <box width={width} height={height} flexDirection="column" backgroundColor={theme.background} onMouseUp={copySelection}>
       <Header runtime={runtime} theme={theme} pending={pending} zh={zh} />
       <TabBar active={tab} theme={theme} zh={zh} onSelect={switchTab} />
@@ -216,5 +220,6 @@ export function App({ controller, onExit }: { controller: TuiController; onExit:
       <Footer tab={tab} detail={detail} theme={theme} zh={zh} notice={notice} />
       {form ? <FormDialog key={form.id} questions={form.questions} preamble={form.preamble} theme={theme} width={width} height={height} zh={zh} onComplete={completeForm} onCancel={cancelForm} /> : null}
     </box>
+    </FatalErrorBoundary>
   );
 }

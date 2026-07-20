@@ -13,11 +13,13 @@ import { LiteStore } from './store.js';
 import { activeWorkspaceRuntimePids, appendWorkspaceLog, workspaceId } from './instances.js';
 import { WorkspaceCatalog } from './workspace-catalog.js';
 import { PortClusterRegistry, tokenHash, type ClusterMember } from './cluster.js';
-import { CLUSTER_PROTOCOL_VERSION, CURRENT_VERSION } from './update.js';
+import { CLUSTER_PROTOCOL_VERSION, CURRENT_VERSION } from './version.js';
 import { commandPassiveLock, disarmAllSessionResources, passiveLockStatus, reapSessionResources, startPassiveLockService } from './session-resources.js';
-import type { LiteConfig, ToolResponse } from './types.js';
+import type { LiteConfig, LiteSettings, ToolResponse } from './types.js';
+import { assessRuntimeEnvironment, type RuntimeEnvironmentStatus } from './config.js';
 
 export type RuntimeLog = { at: string; level: 'info' | 'error'; message: string };
+export type RuntimeHealth = { phase: 'active' | 'revalidating' | 'degraded' | 'shutting_down'; environment: RuntimeEnvironmentStatus; message?: string; lastCheckedAt: string };
 
 /**
  * Process-scoped composition root for one workspace.
@@ -44,6 +46,11 @@ export class LiteRuntime {
   private clusterMember?: ClusterMember;
   private heartbeatTimer?: ReturnType<typeof setInterval>;
   private electionTimer?: ReturnType<typeof setInterval>;
+  private resumeTimer?: ReturnType<typeof setInterval>;
+  private lastMonotonicTick = performance.now();
+  private revalidating = false;
+  private closing?: Promise<void>;
+  private healthState: RuntimeHealth = { phase: 'active', environment: { status: 'valid' }, lastCheckedAt: new Date().toISOString() };
   readonly workspaceCatalog: WorkspaceCatalog;
 
   constructor(readonly config: LiteConfig) {
@@ -58,6 +65,75 @@ export class LiteRuntime {
     this.app.use(express.json({ limit: '256kb' }));
     this.internalServer = http.createServer(this.app);
     this.configureRoutes();
+  }
+
+
+  runtimeHealth(): RuntimeHealth { return { ...this.healthState, environment: { ...this.healthState.environment } }; }
+
+  private settingsSnapshot(): LiteSettings {
+    return {
+      schemaVersion: 1,
+      workspaceDir: this.config.workspaceDir,
+      host: this.config.host,
+      port: this.config.port,
+      connectorKey: this.config.connectorKey,
+      actionsToken: this.config.actionsToken,
+      publicBaseUrl: this.config.publicBaseUrl,
+      maxOutputChars: this.config.maxOutputChars,
+      commandTimeoutSec: this.config.commandTimeoutSec,
+      uiLanguage: this.config.uiLanguage,
+      uiTheme: this.config.uiTheme,
+      passiveLockEnabled: this.config.passiveLockEnabled,
+    };
+  }
+
+  async revalidateAfterResume(reason = 'periodic health check'): Promise<RuntimeHealth> {
+    if (this.revalidating || this.healthState.phase === 'shutting_down') return this.runtimeHealth();
+    this.revalidating = true;
+    this.healthState = { ...this.healthState, phase: 'revalidating', message: reason, lastCheckedAt: new Date().toISOString() };
+    try {
+      const environment = assessRuntimeEnvironment(this.settingsSnapshot());
+      if (environment.status !== 'valid') {
+        this.healthState = { phase: 'degraded', environment, message: environment.message, lastCheckedAt: new Date().toISOString() };
+        this.log(`Runtime degraded: ${environment.message}`, 'error');
+        return this.runtimeHealth();
+      }
+      if (!this.internalServer.listening) throw new Error('Internal server is no longer listening.');
+      if (this.cluster) {
+        this.cluster.ensureRegistered();
+        await this.tryBecomeLeader();
+      } else if (!this.publicServer?.listening) {
+        throw new Error('Public server is no longer listening.');
+      }
+      this.publishWorkspaceRuntime();
+      try { await this.diffCapabilityProbe(); } catch (error) { this.log(`Git capability revalidation failed: ${error instanceof Error ? error.message : String(error)}`, 'error'); }
+      this.healthState = { phase: 'active', environment, lastCheckedAt: new Date().toISOString() };
+      return this.runtimeHealth();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.healthState = { phase: 'degraded', environment: { status: 'state_dir_unavailable', message }, message, lastCheckedAt: new Date().toISOString() };
+      this.log(`Runtime revalidation failed: ${message}`, 'error');
+      return this.runtimeHealth();
+    } finally { this.revalidating = false; }
+  }
+
+  private async diffCapabilityProbe(): Promise<void> {
+    await import('node:fs/promises').then(({ access }) => access(this.config.workspaceDir));
+  }
+
+  private startResumeMonitor(): void {
+    const intervalMs = 2000;
+    this.lastMonotonicTick = performance.now();
+    this.resumeTimer = setInterval(() => {
+      const now = performance.now();
+      const gap = now - this.lastMonotonicTick;
+      this.lastMonotonicTick = now;
+      if (gap > intervalMs * 3 || this.healthState.phase === 'degraded') {
+        void this.revalidateAfterResume(gap > intervalMs * 3 ? `suspend/resume gap detected (${Math.round(gap)}ms)` : 'degraded runtime retry')
+          .catch((error) => this.log(`Resume monitor failed: ${error instanceof Error ? error.message : String(error)}`, 'error'));
+      }
+    }, intervalMs);
+    this.resumeTimer.unref?.();
   }
 
   get port(): number {
@@ -154,6 +230,7 @@ export class LiteRuntime {
       await this.becomeStandaloneLeader(0);
       this.publishWorkspaceRuntime();
       this.startConfiguredPassiveLock();
+      this.startResumeMonitor();
       return;
     }
     this.cluster = new PortClusterRegistry(path.dirname(this.config.settingsPath), this.config.host, this.config.port);
@@ -195,6 +272,7 @@ export class LiteRuntime {
       : `Lite workspace joined shared port ${this.config.host}:${this.config.port} via PID ${leader?.pid}`);
     this.publishWorkspaceRuntime();
     this.startConfiguredPassiveLock();
+    this.startResumeMonitor();
   }
 
   private publishWorkspaceRuntime(): void {
@@ -268,9 +346,17 @@ export class LiteRuntime {
   }
 
   async close(): Promise<void> {
+    if (this.closing) return this.closing;
+    this.closing = this.closeOnce();
+    return this.closing;
+  }
+
+  private async closeOnce(): Promise<void> {
+    this.healthState = { ...this.healthState, phase: 'shutting_down', lastCheckedAt: new Date().toISOString() };
     disarmAllSessionResources(this.config);
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     if (this.electionTimer) clearInterval(this.electionTimer);
+    if (this.resumeTimer) clearInterval(this.resumeTimer);
 
     // Stop accepting public traffic before removing this member from the shared
     // registry. Doing this in the opposite order leaves a live gateway with an
@@ -294,7 +380,7 @@ export class LiteRuntime {
   }
 
   private configureRoutes(): void {
-    this.app.get('/health', (_req, res) => res.json({ ok: true, product: 'localterminal-lite', version: '1.0.1', toolsExposed: 3, sessions: this.store.listSessions().length, activeMcpSessions: this.activeMcpSessions() }));
+    this.app.get('/health', (_req, res) => res.json({ ok: true, product: 'localterminal-lite', version: CURRENT_VERSION, toolsExposed: 3, sessions: this.store.listSessions().length, activeMcpSessions: this.activeMcpSessions() }));
     this.app.get('/openapi.json', (_req, res) => res.json(buildOpenApi({ ...this.config, publicBaseUrl: this.resolvedPublicBaseUrl() })));
     this.app.get('/openapi-3.1.json', (_req, res) => res.json(buildOpenApi({ ...this.config, publicBaseUrl: this.resolvedPublicBaseUrl() })));
     this.app.all('/mcp/:connectorKey', async (req, res) => {

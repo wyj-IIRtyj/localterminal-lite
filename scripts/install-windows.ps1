@@ -1,60 +1,85 @@
 $ErrorActionPreference = "Stop"
 
-$Version = "v1.0.1"
+$Version = if ($env:LOCALTERMINAL_LITE_VERSION) { $env:LOCALTERMINAL_LITE_VERSION } else { "v1.1.0" }
+$Repository = "wyj-IIRtyj/localterminal-lite"
 $InstallDir = if ($env:LOCALTERMINAL_LITE_HOME) { $env:LOCALTERMINAL_LITE_HOME } else { Join-Path $HOME "LocalTerminal-Lite" }
-$ArchiveUrl = if ($env:LOCALTERMINAL_LITE_ARCHIVE_URL) { $env:LOCALTERMINAL_LITE_ARCHIVE_URL } else { "https://github.com/wyj-IIRtyj/localterminal-lite/archive/refs/tags/$Version.zip" }
 $LauncherDir = if ($env:LOCALTERMINAL_LITE_BIN_DIR) { $env:LOCALTERMINAL_LITE_BIN_DIR } else { Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "LocalTerminal-Lite\bin" }
+$Asset = "localterminal-lite-windows-x64.zip"
+$AssetUrl = if ($env:LOCALTERMINAL_LITE_ASSET_URL) { $env:LOCALTERMINAL_LITE_ASSET_URL } else { "https://github.com/$Repository/releases/download/$Version/$Asset" }
+$ChecksumUrl = if ($env:LOCALTERMINAL_LITE_CHECKSUM_URL) { $env:LOCALTERMINAL_LITE_CHECKSUM_URL } else { "$AssetUrl.sha256" }
 $TemporaryDir = Join-Path ([System.IO.Path]::GetTempPath()) ("localterminal-lite-" + [System.Guid]::NewGuid().ToString("N"))
-$Archive = Join-Path $TemporaryDir "localterminal-lite.zip"
+$Archive = Join-Path $TemporaryDir $Asset
+$ChecksumFile = "$Archive.sha256"
 $BackupDir = $null
+$MigratingLegacy = $false
 $Committed = $false
+
+function Test-BinaryLayout {
+  return (Test-Path (Join-Path $InstallDir "releases")) -and (Test-Path (Join-Path $InstallDir "current"))
+}
+
+function Test-LegacyLayout {
+  $PackagePath = Join-Path $InstallDir "package.json"
+  $CliPath = Join-Path $InstallDir "src\cli.ts"
+  if (-not ((Test-Path $PackagePath) -and (Test-Path $CliPath))) { return $false }
+  try { return ((Get-Content -Raw $PackagePath | ConvertFrom-Json).name -eq "localterminal-mcp-lite") }
+  catch { return $false }
+}
 
 try {
   if (Test-Path $InstallDir) {
-    $PackagePath = Join-Path $InstallDir "package.json"
-    $CliPath = Join-Path $InstallDir "src\cli.ts"
-    $PackageName = if (Test-Path $PackagePath) { (Get-Content -Raw $PackagePath | ConvertFrom-Json).name } else { $null }
-    if (($PackageName -ne "localterminal-mcp-lite") -or -not (Test-Path $CliPath)) {
-      throw "The target exists but is not a LocalTerminal Lite installation: $InstallDir"
-    }
     if ((Test-Path (Join-Path $InstallDir ".git")) -and ($env:LOCALTERMINAL_LITE_ALLOW_SOURCE_UPDATE -ne "1")) {
-      throw "Refusing to overwrite a Git source checkout: $InstallDir. Use git pull or set LOCALTERMINAL_LITE_HOME to the release installation directory."
+      throw "Refusing to overwrite a Git source checkout: $InstallDir"
+    }
+    if (-not (Test-BinaryLayout) -and -not (Test-LegacyLayout)) {
+      throw "The target exists but is not a recognized LocalTerminal Lite installation: $InstallDir"
+    }
+    if (Test-LegacyLayout) {
+      $MigratingLegacy = $true
+      $BackupDir = "$InstallDir.backup.$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
+      Move-Item -LiteralPath $InstallDir -Destination $BackupDir
     }
   }
 
-  $Bun = Get-Command bun -ErrorAction SilentlyContinue
-  if (-not $Bun) {
-    Invoke-RestMethod https://bun.com/install.ps1 | Invoke-Expression
-    $BunPath = Join-Path $HOME ".bun\bin\bun.exe"
-    if (-not (Test-Path $BunPath)) { throw "Bun installation did not create $BunPath" }
-  } else { $BunPath = $Bun.Source }
-
-  New-Item -ItemType Directory -Path $TemporaryDir | Out-Null
-  Invoke-WebRequest $ArchiveUrl -OutFile $Archive
-  Expand-Archive -Path $Archive -DestinationPath $TemporaryDir
-  $SourceDir = Get-ChildItem -Path $TemporaryDir -Directory | Where-Object { $_.Name -like "localterminal-lite-*" } | Select-Object -First 1
-  if (-not $SourceDir) { throw "The LocalTerminal Lite archive could not be unpacked." }
-
-  Push-Location $SourceDir.FullName
-  try {
-    & $BunPath install --frozen-lockfile
-    if ($LASTEXITCODE -ne 0) { throw "Dependency installation failed." }
-    & $BunPath run typecheck
-    if ($LASTEXITCODE -ne 0) { throw "Downloaded release failed type checking." }
-  } finally { Pop-Location }
-
-  if (Test-Path $InstallDir) {
-    $BackupDir = "$InstallDir.backup.$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
-    Move-Item -LiteralPath $InstallDir -Destination $BackupDir
-  }
-  Move-Item -LiteralPath $SourceDir.FullName -Destination $InstallDir
-
+  New-Item -ItemType Directory -Force -Path $TemporaryDir | Out-Null
+  New-Item -ItemType Directory -Force -Path (Join-Path $InstallDir "releases") | Out-Null
   New-Item -ItemType Directory -Force -Path $LauncherDir | Out-Null
+
+  Invoke-WebRequest $AssetUrl -OutFile $Archive
+  Invoke-WebRequest $ChecksumUrl -OutFile $ChecksumFile
+  $Expected = ((Get-Content -Raw $ChecksumFile).Trim() -split '\s+')[0].ToLowerInvariant()
+  $Actual = (Get-FileHash -Algorithm SHA256 $Archive).Hash.ToLowerInvariant()
+  if (-not $Expected -or $Expected -ne $Actual) { throw "SHA-256 verification failed for $Asset" }
+
+  $Expanded = Join-Path $TemporaryDir "expanded"
+  Expand-Archive -Path $Archive -DestinationPath $Expanded
+  $Binary = Join-Path $Expanded "localterminal-lite.exe"
+  if (-not (Test-Path $Binary)) { throw "Release asset does not contain localterminal-lite.exe" }
+
+  $ReleaseDir = Join-Path (Join-Path $InstallDir "releases") $Version
+  $ReleaseStaging = Join-Path (Join-Path $InstallDir "releases") (".$Version.staging.$PID")
+  Remove-Item -LiteralPath $ReleaseStaging -Recurse -Force -ErrorAction SilentlyContinue
+  New-Item -ItemType Directory -Force -Path $ReleaseStaging | Out-Null
+  Copy-Item -LiteralPath $Binary -Destination (Join-Path $ReleaseStaging "localterminal-lite.exe")
+  Remove-Item -LiteralPath $ReleaseDir -Recurse -Force -ErrorAction SilentlyContinue
+  Move-Item -LiteralPath $ReleaseStaging -Destination $ReleaseDir
+
+  $CurrentTmp = Join-Path $InstallDir "current.tmp"
+  $CurrentPath = Join-Path $InstallDir "current"
+  Set-Content -Path $CurrentTmp -Value $Version -Encoding Ascii
+  Move-Item -LiteralPath $CurrentTmp -Destination $CurrentPath -Force
+
   $PowerShellLauncher = Join-Path $LauncherDir "localterminal-lite.ps1"
   $CommandLauncher = Join-Path $LauncherDir "localterminal-lite.cmd"
   $EscapedInstallDir = $InstallDir.Replace("'", "''")
-  $EscapedBunPath = $BunPath.Replace("'", "''")
-  @('$ErrorActionPreference = "Stop"', "Set-Location -LiteralPath '$EscapedInstallDir'", "& '$EscapedBunPath' run src/cli.ts @args", 'exit $LASTEXITCODE') | Set-Content -Path $PowerShellLauncher -Encoding Unicode
+  @(
+    '$ErrorActionPreference = "Stop"',
+    "`$Root = '$EscapedInstallDir'",
+    '$Version = (Get-Content -Raw (Join-Path $Root "current")).Trim()',
+    '$Binary = Join-Path (Join-Path (Join-Path $Root "releases") $Version) "localterminal-lite.exe"',
+    '& $Binary @args',
+    'exit $LASTEXITCODE'
+  ) | Set-Content -Path $PowerShellLauncher -Encoding UTF8
   @('@echo off', 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0localterminal-lite.ps1" %*') | Set-Content -Path $CommandLauncher -Encoding Ascii
 
   $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
@@ -63,13 +88,20 @@ try {
     $NewUserPath = if ($UserPath) { "$LauncherDir;$UserPath" } else { $LauncherDir }
     [Environment]::SetEnvironmentVariable("Path", $NewUserPath, "User")
   }
+
+  Get-ChildItem -Path (Join-Path $InstallDir "releases") -Directory -Filter "v*" |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -Skip 2 |
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+
   $Committed = $true
   Write-Host "Installed LocalTerminal Lite $Version: $InstallDir"
+  Write-Host "User settings and workspace state were preserved."
   Write-Host "Start it with: localterminal-lite"
   if ($env:LOCALTERMINAL_LITE_INSTALL_ONLY -ne "1") { & $PowerShellLauncher }
 } catch {
-  if (-not $Committed) {
-    if (Test-Path $InstallDir) { Remove-Item -LiteralPath $InstallDir -Recurse -Force -ErrorAction SilentlyContinue }
+  if (-not $Committed -and $MigratingLegacy) {
+    Remove-Item -LiteralPath $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
     if ($BackupDir -and (Test-Path $BackupDir)) { Move-Item -LiteralPath $BackupDir -Destination $InstallDir -ErrorAction SilentlyContinue }
   }
   throw

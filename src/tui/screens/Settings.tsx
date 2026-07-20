@@ -1,13 +1,12 @@
 import type { LiteRuntime } from '../../server.js';
-import { maskCredential, readLiteSettings } from '../../config.js';
+import { maskCredential } from '../../config.js';
 import type { Theme } from '../state.js';
 import type { UpdateStatus } from '../../update.js';
 import { Heading, Line } from './shared.js';
 import { runtimeSettingsSnapshot } from '../../runtime-settings.js';
 
 export function Settings({ runtime, theme, zh, reveal, update }: { runtime: LiteRuntime; theme: Theme; zh: boolean; reveal: boolean; update: UpdateStatus }) {
-  const persisted = readLiteSettings();
-  const config = runtimeSettingsSnapshot(runtime, persisted);
+  const config = runtimeSettingsSnapshot(runtime);
   const passiveStatus = runtime.passiveLockStatus();
   const passiveEnabled = config.passiveLockEnabled;
   const permissionMissing = /waiting_accessibility_permission|requesting_accessibility_permission|permission_window_visible/.test(passiveStatus.state);

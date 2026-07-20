@@ -1,0 +1,95 @@
+name: Release binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: darwin-x64
+            runner: macos-15-intel
+            executable: localterminal-lite
+            asset: localterminal-lite-darwin-x64.tar.gz
+          - platform: darwin-arm64
+            runner: macos-14
+            executable: localterminal-lite
+            asset: localterminal-lite-darwin-arm64.tar.gz
+          - platform: linux-x64
+            runner: ubuntu-24.04
+            executable: localterminal-lite
+            asset: localterminal-lite-linux-x64.tar.gz
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+            executable: localterminal-lite
+            asset: localterminal-lite-linux-arm64.tar.gz
+          - platform: windows-x64
+            runner: windows-2022
+            executable: localterminal-lite.exe
+            asset: localterminal-lite-windows-x64.zip
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun test --timeout 120000 test/*.test.mjs
+        shell: bash
+      - name: Build standalone executable
+        run: bun build --compile --minify src/cli.ts --outfile release/${{ matrix.executable }}
+        shell: bash
+      - name: Smoke test executable
+        run: release/${{ matrix.executable }} --help
+        shell: bash
+      - name: Package Unix asset
+        if: runner.os != 'Windows'
+        run: |
+          chmod 755 release/${{ matrix.executable }}
+          tar -czf release/${{ matrix.asset }} -C release ${{ matrix.executable }}
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum release/${{ matrix.asset }} | sed 's#release/##' > release/${{ matrix.asset }}.sha256
+          else
+            shasum -a 256 release/${{ matrix.asset }} | sed 's#release/##' > release/${{ matrix.asset }}.sha256
+          fi
+        shell: bash
+      - name: Package Windows asset
+        if: runner.os == 'Windows'
+        run: |
+          Compress-Archive -Path "release/${{ matrix.executable }}" -DestinationPath "release/${{ matrix.asset }}"
+          $hash = (Get-FileHash -Algorithm SHA256 "release/${{ matrix.asset }}").Hash.ToLowerInvariant()
+          "$hash  ${{ matrix.asset }}" | Set-Content -Encoding Ascii "release/${{ matrix.asset }}.sha256"
+        shell: powershell
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: |
+            release/${{ matrix.asset }}
+            release/${{ matrix.asset }}.sha256
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+      - name: Publish GitHub release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/*
+          generate_release_notes: false
+          body_path: RELEASE_NOTES.md

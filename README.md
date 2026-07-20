@@ -4,7 +4,7 @@
 
 LocalTerminal Lite gives **ChatGPT's normal chat mode a controlled way to work on your local computer**. After you connect Lite through a custom GPT Action or a ChatGPT App, a regular ChatGPT conversation can inspect and edit the authorized local project, run bounded tools, coordinate multiple work sessions, and report progress while you retain control in a local TUI. Lite is the bridge between ChatGPT chat and your computer; it is not a replacement chat client.
 
-LocalTerminal Lite 1.0.1 provides that bridge through an auditable, inheritable work-session layer. It supports ChatGPT **Actions** and **Apps (MCP)**, multi-session collaboration, durable messages, declarative extensions, Git-style live diff tracking, and a full-window bilingual OpenTUI interface.
+LocalTerminal Lite 1.1.0 provides that bridge through an auditable, inheritable work-session layer. It supports ChatGPT **Actions** and **Apps (MCP)**, multi-session collaboration, durable messages, declarative extensions, Git-style live diff tracking, and a full-window bilingual OpenTUI interface.
 
 ![LocalTerminal Lite session hierarchy](docs/assets/tui/sessions-en.svg)
 
@@ -12,27 +12,33 @@ LocalTerminal Lite 1.0.1 provides that bridge through an auditable, inheritable 
 
 ### First installation
 
-You do not need Git, Node.js, Bun, or another programming environment beforehand. The installers fetch Bun when needed, download the fixed `v1.0.1` source archive, install locked dependencies, register the global `localterminal-lite` command, and start the TUI.
+You do not need Git, Node.js, Bun, or another programming environment beforehand. The installers download the standalone `v1.1.0` executable for the current operating system and CPU architecture, verify its SHA-256 checksum, register the global `localterminal-lite` command, and start the TUI. Release installations no longer download a source archive or runtime dependencies.
 
 #### macOS
 
 ```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.0.1/scripts/install-macos.sh)"
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.1.0/scripts/install-macos.sh)"
+```
+
+#### Linux
+
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.1.0/scripts/install-linux.sh)"
 ```
 
 #### Windows PowerShell
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.0.1/scripts/install-windows.ps1 | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.1.0/scripts/install-windows.ps1 | iex"
 ```
 
-Remote scripts are convenient but security-sensitive. You can inspect [install-macos.sh](scripts/install-macos.sh) or [install-windows.ps1](scripts/install-windows.ps1) before running them.
+Remote scripts are convenient but security-sensitive. You can inspect [install-macos.sh](scripts/install-macos.sh), [install-linux.sh](scripts/install-linux.sh), or [install-windows.ps1](scripts/install-windows.ps1) before running them.
 
 The first-run TUI configures everything: language, theme, authorized workspace, bind address, public URL, limits, Apps connector key, and Actions token. No `.env` or manual configuration-file editing is required.
 
 ### Start it again later
 
-Open a new Terminal, PowerShell, or Command Prompt window and use the global command installed for your user account. The launcher remembers the actual Lite installation directory and Bun executable, including custom locations. Existing `v1.0.0` users may run the `v1.0.1` installer once: it recognizes a valid existing installation and repairs its dependencies and global launcher without deleting Lite settings.
+Open a new Terminal, PowerShell, or Command Prompt window and use the global command installed for your user account. The launcher resolves the current executable through a versioned `releases/<version>` directory and an atomic `current` pointer. Users of the GitHub `v1.0.1` source-archive installation, an intermediate development installation, or an earlier binary release may run the `v1.1.0` installer directly for a lossless migration. Settings, credentials, workspaces, sessions, messages, and history are preserved.
 
 ```text
 localterminal-lite
@@ -159,7 +165,7 @@ Licensed under the [Apache License 2.0](LICENSE), which permits personal and com
 LocalTerminal Lite is an independent open-source project and is not affiliated with or endorsed by OpenAI or Cloudflare. ChatGPT, OpenAI, and Cloudflare names are used only to describe interoperability.
 ## Updates
 
-LocalTerminal Lite checks the latest GitHub release when the TUI starts. The Settings tab shows the installed and latest versions; press `U` to install an available release. Release installations are replaced atomically after dependency installation and type checking, with rollback on failure. Git source checkouts are never overwritten by one-click update.
+LocalTerminal Lite checks the latest GitHub release when the TUI starts. The Settings tab shows the installed and latest versions; press `U` to install an available release. The updater downloads the precompiled executable and SHA-256 file for the current platform, installs it into a new version directory, and atomically switches the `current` pointer. The old version remains available for rollback. Git source checkouts are never overwritten by one-click update. See the [v1.1.0 release notes](RELEASE_NOTES.md) for migration and future-update details.
 
 Workspace state migration is additive and idempotent: existing target state, legacy global state, `state.migrated`, and the workspace `.localterminal-lite` directory are merged by stable IDs, while session history files are deduplicated and retained.
 ## Shared ports and workspace routing
@@ -169,7 +175,7 @@ Multiple LocalTerminal Lite processes may use the same `host:port` when they sha
 On a shared port, `extension_discover` lists the active workspace IDs. A new root session must pass `workspaceId` in the `session_register` input. Later calls are routed by Lite session identity, and Apps calls may continue through their verified `openai/session` binding. The same workspace cannot be active in two processes. Unrelated programs occupying the port still trigger the normal kill/change/cancel flow. Different ports form independent groups and keep their aggregated logs separate.
 ### macOS passive-lock protection
 
-The Settings page exposes a macOS-only passive-lock control with three actions: `arm`, `standby`, and `off`. `arm` keeps the display awake, shows a full-screen protection overlay, and sends the system `Control–Command–Q` shortcut on the first keyboard or mouse event. After locking, the helper remains alive in `standby`, releases its power assertion and input monitors, and lets the user operate the Mac normally. The user may later choose `arm` again or `off` to terminate the helper. LocalTerminal Lite also terminates the helper during `q` shutdown or runtime close, so no child process should remain.
+The Settings page exposes a macOS-only passive-lock control with three actions: `arm`, `standby`, and `off`. `arm` keeps the display awake, shows a full-screen protection overlay, and sends the system `Control–Command–Q` shortcut on the first keyboard or mouse event. After locking, the helper remains alive in `standby`, releases its power assertion and input monitors, and lets the user operate the Mac normally. The user may later choose `arm` again or `off` to terminate the helper. The installation-global helper is terminated only when the last LocalTerminal Lite process exits; closing one workspace runtime does not interrupt other active processes.
 
 The feature currently supports macOS only. It requires Accessibility permission for the terminal or host process that launched LocalTerminal Lite (for example Terminal or iTerm2). Some macOS versions may also list `LocalTerminal Lite Passive Lock`. The permission dialog and Settings page state exactly which permission is required and where to grant it.
 

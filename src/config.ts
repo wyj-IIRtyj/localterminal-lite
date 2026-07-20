@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
 import http from 'node:http';
 import { describePortOwner, portOwner, upsertWorkspaceRecord, workspaceId, workspaceStateDir } from './instances.js';
@@ -39,8 +39,38 @@ export function defaultWorkspaceForCwd(cwd = process.cwd()): string {
 }
 
 export function isDirectory(candidate: string): boolean {
-  return existsSync(candidate) && statSync(candidate).isDirectory();
+  try { return existsSync(candidate) && statSync(candidate).isDirectory(); }
+  catch { return false; }
 }
+
+export type RuntimeEnvironmentStatus =
+  | { status: 'valid' }
+  | { status: 'workspace_missing' | 'volume_unmounted' | 'permission_denied' | 'state_dir_unavailable'; message: string };
+
+export function assessRuntimeEnvironment(settings: LiteSettings, env: NodeJS.ProcessEnv = process.env): RuntimeEnvironmentStatus {
+  const workspaceDir = path.resolve(settings.workspaceDir);
+  try {
+    if (!existsSync(workspaceDir)) {
+      const volumeRoot = workspaceDir.startsWith('/Volumes/') ? workspaceDir.split('/').slice(0, 3).join('/') : undefined;
+      return volumeRoot && !existsSync(volumeRoot)
+        ? { status: 'volume_unmounted', message: `Workspace volume is not mounted: ${volumeRoot}` }
+        : { status: 'workspace_missing', message: `Workspace is unavailable: ${workspaceDir}` };
+    }
+    if (!statSync(workspaceDir).isDirectory()) return { status: 'workspace_missing', message: `Workspace is not a directory: ${workspaceDir}` };
+  } catch (error) {
+    const detail = error as NodeJS.ErrnoException;
+    if (detail.code === 'EACCES' || detail.code === 'EPERM') return { status: 'permission_denied', message: `Workspace permission denied: ${workspaceDir}` };
+    return { status: 'workspace_missing', message: `Workspace is unavailable: ${detail.message}` };
+  }
+  try {
+    const configDir = path.dirname(settingsPath(env));
+    mkdirSync(configDir, { recursive: true, mode: 0o700 });
+  } catch (error) {
+    return { status: 'state_dir_unavailable', message: `Settings directory is unavailable: ${error instanceof Error ? error.message : String(error)}` };
+  }
+  return { status: 'valid' };
+}
+
 
 export function isValidPublicBaseUrl(value: string): boolean {
   if (!value) return true;
@@ -72,7 +102,7 @@ export function createDefaultSettings(workspaceDir = defaultWorkspaceForCwd()): 
 
 export function validateSettings(settings: LiteSettings): string[] {
   const errors: string[] = [];
-  if (typeof settings.workspaceDir !== 'string' || !isDirectory(settings.workspaceDir)) errors.push(`Workspace is not a directory: ${settings.workspaceDir || '(empty)'}`);
+  if (typeof settings.workspaceDir !== 'string' || !settings.workspaceDir.trim()) errors.push('Workspace cannot be empty.');
   if (typeof settings.host !== 'string' || !settings.host.trim()) errors.push('Host cannot be empty.');
   if (!Number.isInteger(settings.port) || settings.port < 0 || settings.port > 65535) errors.push('Port must be an integer from 0 to 65535.');
   if (typeof settings.publicBaseUrl !== 'string' || !isValidPublicBaseUrl(settings.publicBaseUrl)) errors.push('Public URL must use HTTPS (localhost may use HTTP).');
@@ -88,6 +118,8 @@ export function validateSettings(settings: LiteSettings): string[] {
 
 export async function validateSettingsFeasibility(settings: LiteSettings, current?: { host: string; port: number }): Promise<string[]> {
   const errors = validateSettings(settings);
+  const environment = assessRuntimeEnvironment(settings);
+  if (environment.status !== 'valid') errors.push(environment.message);
   if (errors.length || settings.port === 0 || (current && current.host === settings.host && current.port === settings.port)) return errors;
   const portError = await new Promise<string | undefined>((resolve) => {
     const probe = net.createServer();
@@ -119,7 +151,7 @@ export async function validateSettingsFeasibility(settings: LiteSettings, curren
   return portError ? [...errors, portError] : errors;
 }
 
-export function readLiteSettings(env: NodeJS.ProcessEnv = process.env): LiteSettings | undefined {
+export function parseLiteSettings(env: NodeJS.ProcessEnv = process.env): LiteSettings | undefined {
   const configPath = settingsPath(env);
   if (!existsSync(configPath)) return undefined;
   const parsed = JSON.parse(readFileSync(configPath, 'utf8')) as Partial<LiteSettings>;
@@ -129,6 +161,8 @@ export function readLiteSettings(env: NodeJS.ProcessEnv = process.env): LiteSett
   if (errors.length) throw new Error(`Invalid Lite settings: ${errors.join(' ')}`);
   return settings;
 }
+
+export const readLiteSettings = parseLiteSettings;
 
 export function saveLiteSettings(settings: LiteSettings, env: NodeJS.ProcessEnv = process.env): void {
   const normalized: LiteSettings = {
@@ -141,8 +175,16 @@ export function saveLiteSettings(settings: LiteSettings, env: NodeJS.ProcessEnv 
   if (errors.length) throw new Error(errors.join(' '));
   const configPath = settingsPath(env);
   mkdirSync(path.dirname(configPath), { recursive: true, mode: 0o700 });
-  writeFileSync(configPath, `${JSON.stringify(normalized, null, 2)}\n`, { mode: 0o600 });
-  chmodSync(configPath, 0o600);
+  const temporaryPath = `${configPath}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
+  try {
+    writeFileSync(temporaryPath, `${JSON.stringify(normalized, null, 2)}\n`, { mode: 0o600 });
+    chmodSync(temporaryPath, 0o600);
+    renameSync(temporaryPath, configPath);
+    chmodSync(configPath, 0o600);
+  } catch (error) {
+    try { unlinkSync(temporaryPath); } catch { /* best effort */ }
+    throw error;
+  }
 }
 
 export function rotateLiteCredentials(settings: LiteSettings): LiteSettings {
@@ -177,6 +219,8 @@ export function loadLiteConfig(env: NodeJS.ProcessEnv = process.env): LiteConfig
   const settings = settingsWithEnvironment(base, env);
   const errors = validateSettings(settings);
   if (errors.length) throw new Error(errors.join(' '));
+  const environment = assessRuntimeEnvironment(settings, env);
+  if (environment.status !== 'valid') throw new Error(environment.message);
   const workspaceDir = realpathSync(settings.workspaceDir);
   const configDir = path.dirname(settingsPath(env));
   const stateDir = workspaceStateDir(configDir, workspaceDir);

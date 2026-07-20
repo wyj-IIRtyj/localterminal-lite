@@ -13,10 +13,10 @@ import { WorkspaceDiffTracker } from '../dist/diff.js';
 import { conversationGroups, logicalSessionGroups, selectedViewport } from '../dist/tui-model.js';
 import { phaseColor, presenceColor, themeFor } from '../dist/tui/state.js';
 import { initialQuestionState, nextTextValue, optionAnswer, toggleSelectedOption, workspaceChoiceQuestion, workspaceOptionLabel } from '../dist/tui/form-model.js';
-import { createDefaultSettings, loadLiteConfig, readLiteSettings, saveLiteSettings, settingsPath, validateSettingsFeasibility } from '../dist/config.js';
+import { assessRuntimeEnvironment, createDefaultSettings, loadLiteConfig, readLiteSettings, rotateLiteCredentials, saveLiteSettings, settingsPath, validateSettingsFeasibility } from '../dist/config.js';
 import { activeWorkspaceRuntimePids, appendWorkspaceLog, findAvailablePort, readWorkspaceLogs, readWorkspaceRegistry, resolveWorkspaceInput, upsertWorkspaceRecord, workspaceChoiceHint, workspaceId } from '../dist/instances.js';
 import { migrateWorkspaceState } from '../dist/migration.js';
-import { checkForUpdate, isNewerVersion } from '../dist/update.js';
+import { checkForUpdate, installedVersion, installationRoot, isNewerVersion, isSourceCheckout } from '../dist/update.js';
 import { clusterKey, PortClusterRegistry, tokenHash } from '../dist/cluster.js';
 import { disarmAllSessionResources, disarmSessionResources, passiveLockStatus } from '../dist/session-resources.js';
 import { ADD_WORKSPACE_ID, isAddWorkspaceSelection, selectedWorkspace, workspaceSelectionIndex, workspaceSelectionItems } from '../dist/workspace-selection.js';
@@ -268,6 +268,25 @@ test('update checker compares releases without blocking startup failures', async
   const failed = await checkForUpdate(async () => new Response('offline', { status: 503 }));
   assert.equal(failed.updateAvailable, false);
   assert.match(failed.error, /HTTP 503/);
+});
+
+test('binary updater detects versioned installation roots and current versions', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-versioned-install-'));
+  const previous = process.env.LOCALTERMINAL_LITE_HOME;
+  try {
+    fs.mkdirSync(path.join(root, 'releases', 'v1.1.0'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'current'), 'v1.1.0\n');
+    process.env.LOCALTERMINAL_LITE_HOME = root;
+    assert.equal(installationRoot(), path.resolve(root));
+    assert.equal(installedVersion(root), '1.1.0');
+    assert.equal(isSourceCheckout(root), false);
+    fs.mkdirSync(path.join(root, '.git'));
+    assert.equal(isSourceCheckout(root), true);
+  } finally {
+    if (previous === undefined) delete process.env.LOCALTERMINAL_LITE_HOME;
+    else process.env.LOCALTERMINAL_LITE_HOME = previous;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('cluster rejects incompatible protocol versions and legacy servers are not joinable', async () => {
@@ -1042,4 +1061,82 @@ test('Apps exposes only three tools and binds openai/session only after explicit
     const differentChat = await rpcPost(url, { jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'extension_discover', arguments: {}, _meta: { 'openai/session': 'chat-b' } } }, init.sessionId);
     assert.equal(differentChat.data.result.structuredContent.data.identityRequired, true);
   } finally { await server.close(); }
+});
+
+
+test('temporarily unavailable workspace preserves parsed settings and credentials byte-for-byte', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-credential-stability-'));
+  const workspaceDir = path.join(root, 'workspace');
+  const configDir = path.join(root, 'config');
+  fs.mkdirSync(workspaceDir, { recursive: true });
+  const env = { ...process.env, LITE_CONFIG_DIR: configDir };
+  const settings = { ...createDefaultSettings(workspaceDir), connectorKey: CONNECTOR_KEY, actionsToken: ACTIONS_TOKEN };
+  saveLiteSettings(settings, env);
+  const before = fs.readFileSync(settingsPath(env));
+  fs.renameSync(workspaceDir, `${workspaceDir}.offline`);
+  const parsed = readLiteSettings(env);
+  assert.equal(parsed.connectorKey, CONNECTOR_KEY);
+  assert.equal(parsed.actionsToken, ACTIONS_TOKEN);
+  assert.equal(assessRuntimeEnvironment(parsed, env).status, 'workspace_missing');
+  assert.deepEqual(fs.readFileSync(settingsPath(env)), before);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('credential generation is explicit and read failures never invoke rotation', () => {
+  const source = fs.readFileSync(new URL('../src/cli.ts', import.meta.url), 'utf8');
+  assert.match(source, /Invalid or temporarily unreadable settings must never fall through/);
+  assert.doesNotMatch(source, /catch \(error\)[\s\S]{0,160}createDefaultSettings/);
+  const stable = { ...createDefaultSettings(process.cwd()), connectorKey: CONNECTOR_KEY, actionsToken: ACTIONS_TOKEN };
+  const rotated = rotateLiteCredentials(stable);
+  assert.notEqual(rotated.connectorKey, stable.connectorKey);
+  assert.notEqual(rotated.actionsToken, stable.actionsToken);
+});
+
+test('runtime enters degraded state for mount loss and recovers without changing credentials', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-resume-'));
+  const workspaceDir = path.join(root, 'workspace');
+  const stateDir = path.join(root, 'state');
+  fs.mkdirSync(workspaceDir, { recursive: true });
+  fs.mkdirSync(stateDir, { recursive: true });
+  const runtime = new LiteRuntime({ workspaceDir, stateDir, settingsPath: path.join(root, 'config.json'), host: '127.0.0.1', port: 0, connectorKey: CONNECTOR_KEY, actionsToken: ACTIONS_TOKEN, publicBaseUrl: 'http://127.0.0.1:0', maxOutputChars: 20_000, commandTimeoutSec: 10, uiLanguage: 'zh-CN', uiTheme: 'dark', passiveLockEnabled: false });
+  await runtime.start();
+  const renamed = `${workspaceDir}.offline`;
+  try {
+    fs.renameSync(workspaceDir, renamed);
+    const degraded = await runtime.revalidateAfterResume('test mount loss');
+    assert.equal(degraded.phase, 'degraded');
+    assert.equal(runtime.config.connectorKey, CONNECTOR_KEY);
+    assert.equal(runtime.config.actionsToken, ACTIONS_TOKEN);
+    fs.renameSync(renamed, workspaceDir);
+    const recovered = await runtime.revalidateAfterResume('test mount restored');
+    assert.equal(recovered.phase, 'active');
+  } finally {
+    if (fs.existsSync(renamed) && !fs.existsSync(workspaceDir)) fs.renameSync(renamed, workspaceDir);
+    await runtime.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('fatal TUI boundary logs render failures and exposes q or Escape safe exit', () => {
+  const boundary = fs.readFileSync(new URL('../src/tui/FatalErrorBoundary.tsx', import.meta.url), 'utf8');
+  const app = fs.readFileSync(new URL('../src/tui/App.tsx', import.meta.url), 'utf8');
+  assert.match(boundary, /componentDidCatch/);
+  assert.match(boundary, /runtime\.log/);
+  assert.match(boundary, /Press q or Esc|按 q 或 Esc/);
+  assert.match(app, /fatalError && \(event\.name === 'q' \|\| event\.name === 'escape'\)/);
+  assert.match(app, /void quit\(\)/);
+});
+
+test('message composer does not open when no active recipient exists', () => {
+  const source = fs.readFileSync(new URL('../src/tui/state.ts', import.meta.url), 'utf8');
+  const block = source.slice(source.indexOf('async sendMessage'), source.indexOf('async addExtension'));
+  assert.match(block, /if \(!sessions\.length\)/);
+  assert.match(block, /No active sessions are available to receive a message/);
+  assert.doesNotMatch(block, /not impersonating any session|不会冒充任何 session/);
+  assert.ok(block.indexOf('if (!sessions.length)') < block.indexOf('const answers = await ask'));
+});
+
+test('project copy constraints forbid exposing implementation requirements as UI copy', () => {
+  const constraints = fs.readFileSync(new URL('../AGENTS.md', import.meta.url), 'utf8');
+  assert.match(constraints, /must not be shown as user-facing UI copy/);
 });
