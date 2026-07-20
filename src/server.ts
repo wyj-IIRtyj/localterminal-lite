@@ -10,7 +10,8 @@ import { LiteMcpTransport } from './mcp.js';
 import { ClusterExtensionRouter } from './cluster-router.js';
 import { safeEqual } from './security.js';
 import { LiteStore } from './store.js';
-import { appendWorkspaceLog, upsertWorkspaceRecord, workspaceId } from './instances.js';
+import { activeWorkspaceRuntimePids, appendWorkspaceLog, workspaceId } from './instances.js';
+import { WorkspaceCatalog } from './workspace-catalog.js';
 import { PortClusterRegistry, tokenHash, type ClusterMember } from './cluster.js';
 import { CLUSTER_PROTOCOL_VERSION, CURRENT_VERSION } from './update.js';
 import { commandPassiveLock, disarmAllSessionResources, passiveLockStatus, reapSessionResources, startPassiveLockService } from './session-resources.js';
@@ -18,6 +19,15 @@ import type { LiteConfig, ToolResponse } from './types.js';
 
 export type RuntimeLog = { at: string; level: 'info' | 'error'; message: string };
 
+/**
+ * Process-scoped composition root for one workspace.
+ *
+ * Ownership boundaries:
+ * - owns workspace-local HTTP/MCP servers, timers, store, and runtime lease;
+ * - participates in, but does not exclusively own, a shared-port cluster;
+ * - may command the installation-global passive-lock helper, but may stop it
+ *   only after global process liveness reaches zero.
+ */
 export class LiteRuntime {
   readonly store: LiteStore;
   readonly extensions: ExtensionService;
@@ -34,8 +44,10 @@ export class LiteRuntime {
   private clusterMember?: ClusterMember;
   private heartbeatTimer?: ReturnType<typeof setInterval>;
   private electionTimer?: ReturnType<typeof setInterval>;
+  readonly workspaceCatalog: WorkspaceCatalog;
 
   constructor(readonly config: LiteConfig) {
+    this.workspaceCatalog = WorkspaceCatalog.fromConfig(config);
     reapSessionResources(config);
     this.store = new LiteStore(config.stateDir);
     const builtins = createBuiltinTools(config, this.store);
@@ -59,6 +71,18 @@ export class LiteRuntime {
 
   clusterMemberCount(): number {
     return this.cluster?.read().members.length || 1;
+  }
+
+  /** Return the process topology shown by the TUI and health diagnostics. */
+  processTopology(): { sharedPort: number; memberCount: number; role: 'leader' | 'member'; pid: number } {
+    if (!this.cluster) return { sharedPort: this.port, memberCount: 1, role: 'leader', pid: process.pid };
+    const state = this.cluster.read();
+    return {
+      sharedPort: state.port,
+      memberCount: state.members.length,
+      role: state.leaderId === this.cluster.memberId ? 'leader' : 'member',
+      pid: process.pid,
+    };
   }
 
   passiveLockStatus(): ReturnType<typeof passiveLockStatus> {
@@ -95,6 +119,7 @@ export class LiteRuntime {
     });
     if (this.config.port === 0) {
       await this.becomeStandaloneLeader(0);
+      this.publishWorkspaceRuntime();
       this.startConfiguredPassiveLock();
       return;
     }
@@ -128,8 +153,18 @@ export class LiteRuntime {
     this.log(this.publicServer?.listening
       ? `Lite cluster leader listening on ${this.config.host}:${this.config.port}`
       : `Lite workspace joined shared port ${this.config.host}:${this.config.port} via PID ${leader?.pid}`);
-    try { upsertWorkspaceRecord(path.dirname(this.config.settingsPath), { id: workspaceId(this.config.workspaceDir), workspaceDir: this.config.workspaceDir, stateDir: this.config.stateDir, lastHost: this.config.host, lastPort: this.config.port, lastPid: process.pid, lastStartedAt: new Date().toISOString(), lastSeenAt: new Date().toISOString() }); } catch { /* registry is best effort */ }
+    this.publishWorkspaceRuntime();
     this.startConfiguredPassiveLock();
+  }
+
+  private publishWorkspaceRuntime(): void {
+    try { this.workspaceCatalog.publish(this.config, this.port); }
+    catch { /* registry is best effort */ }
+  }
+
+  private releaseWorkspaceRuntime(): void {
+    try { this.workspaceCatalog.release(this.config.workspaceDir); }
+    catch { /* registry is best effort */ }
   }
 
   private startConfiguredPassiveLock(): void {
@@ -193,18 +228,29 @@ export class LiteRuntime {
   }
 
   async close(): Promise<void> {
-    if (process.platform === 'darwin') {
-      try { commandPassiveLock(this.config, 'stop'); }
-      catch (error) { this.log(error instanceof Error ? error.message : String(error), 'error'); }
-    }
     disarmAllSessionResources(this.config);
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     if (this.electionTimer) clearInterval(this.electionTimer);
+
+    // Stop accepting public traffic before removing this member from the shared
+    // registry. Doing this in the opposite order leaves a live gateway with an
+    // empty member list during shutdown, which surfaces as a false
+    // WORKSPACE_UNAVAILABLE response even though another member can take over.
+    if (this.publicServer?.listening) await new Promise<void>((resolve) => this.publicServer!.close(() => resolve()));
     try { this.cluster?.unregister(); } catch { /* best effort */ }
+
     await this.mcp.close();
     if (this.clusterMcp) await this.clusterMcp.close();
-    if (this.publicServer?.listening) await new Promise<void>((resolve) => this.publicServer!.close(() => resolve()));
     if (this.internalServer.listening) await new Promise<void>((resolve) => this.internalServer.close(() => resolve()));
+    this.releaseWorkspaceRuntime();
+
+    // The passive-lock helper is global to the LocalTerminal installation, not
+    // owned by an individual workspace runtime. Stop it only after this lease
+    // is released and no other live LocalTerminal process remains.
+    if (process.platform === 'darwin' && activeWorkspaceRuntimePids(path.dirname(this.config.settingsPath), process.pid).length === 0) {
+      try { commandPassiveLock(this.config, 'stop'); }
+      catch (error) { this.log(error instanceof Error ? error.message : String(error), 'error'); }
+    }
   }
 
   private configureRoutes(): void {

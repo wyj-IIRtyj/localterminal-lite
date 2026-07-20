@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 
@@ -40,13 +40,58 @@ export function readWorkspaceRegistry(configDir: string): WorkspaceRecord[] {
   }
 }
 
-export function upsertWorkspaceRecord(configDir: string, record: WorkspaceRecord): void {
+/**
+ * Serialize every workspace-catalog mutation across processes and replace the
+ * file atomically. Callers must keep durable catalog data and transient runtime
+ * lease fields consistent within one update callback.
+ */
+function updateWorkspaceRegistry(configDir: string, update: (records: WorkspaceRecord[]) => WorkspaceRecord[]): void {
   mkdirSync(configDir, { recursive: true, mode: 0o700 });
-  const records = readWorkspaceRegistry(configDir);
-  const index = records.findIndex((item) => item.id === record.id);
-  if (index >= 0) records[index] = { ...records[index], ...record };
-  else records.push(record);
-  writeFileSync(registryPath(configDir), JSON.stringify({ schemaVersion: 1, workspaces: records }, null, 2) + '\n', { mode: 0o600 });
+  const file = registryPath(configDir);
+  const lock = `${file}.lock`;
+  const deadline = Date.now() + 2000;
+  for (;;) {
+    try {
+      writeFileSync(lock, `${process.pid}`, { flag: 'wx', mode: 0o600 });
+      break;
+    } catch {
+      try {
+        const owner = Number(readFileSync(lock, 'utf8'));
+        const stale = Date.now() - statSync(lock).mtimeMs > 5000;
+        let alive = true;
+        try { process.kill(owner, 0); } catch { alive = false; }
+        if (!alive || stale) { unlinkSync(lock); continue; }
+      } catch { try { unlinkSync(lock); } catch { /* another contender */ } }
+      if (Date.now() >= deadline) throw new Error(`Workspace registry lock timeout: ${lock}`);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+    }
+  }
+  try {
+    const records = update(readWorkspaceRegistry(configDir));
+    const temporary = `${file}.${process.pid}.tmp`;
+    writeFileSync(temporary, JSON.stringify({ schemaVersion: 1, workspaces: records }, null, 2) + '\n', { mode: 0o600 });
+    renameSync(temporary, file);
+  } finally {
+    try { if (existsSync(lock)) unlinkSync(lock); } catch { /* best effort */ }
+  }
+}
+
+export function upsertWorkspaceRecord(configDir: string, record: WorkspaceRecord): void {
+  updateWorkspaceRegistry(configDir, (records) => {
+    const index = records.findIndex((item) => item.id === record.id);
+    if (index >= 0) records[index] = { ...records[index], ...record };
+    else records.push(record);
+    return records;
+  });
+}
+
+/** Release only the transient lease owned by the matching workspace and PID. */
+export function releaseWorkspaceRecord(configDir: string, id: string, pid: number): void {
+  updateWorkspaceRegistry(configDir, (records) => records.map((record) => {
+    if (record.id !== id || record.lastPid !== pid) return record;
+    const { lastPid: _lastPid, ...released } = record;
+    return { ...released, lastSeenAt: new Date().toISOString() };
+  }));
 }
 
 export function appendWorkspaceLog(stateDir: string, entry: unknown): void {
@@ -68,6 +113,21 @@ export function readWorkspaceLogs(configDir: string, limitPerWorkspace = 500): A
 export function isWorkspaceRecordActive(record: WorkspaceRecord): boolean {
   if (!record.lastPid || record.lastPid === process.pid) return false;
   try { process.kill(record.lastPid, 0); return true; } catch { return false; }
+}
+
+/**
+ * Count distinct live LocalTerminal runtime processes recorded in the global
+ * workspace catalog. Runtime ownership is process-scoped, so multiple stale or
+ * duplicate workspace rows for the same PID must count only once.
+ */
+export function activeWorkspaceRuntimePids(configDir: string, excludePid?: number): number[] {
+  const pids = new Set<number>();
+  for (const record of readWorkspaceRegistry(configDir)) {
+    const pid = record.lastPid;
+    if (!pid || pid === excludePid || pids.has(pid)) continue;
+    try { process.kill(pid, 0); pids.add(pid); } catch { /* stale lease */ }
+  }
+  return [...pids].sort((left, right) => left - right);
 }
 
 export function resolveWorkspaceInput(input: string, records: WorkspaceRecord[]): string {
