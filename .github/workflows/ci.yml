@@ -14,57 +14,98 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14
       - run: bun install --frozen-lockfile
-      - name: Validate and exercise macOS installer
-        if: runner.os == 'macOS'
+      - run: bun run typecheck
+      - run: bun run build
+      - run: bun test --timeout 300000 test/*.test.mjs
+        shell: bash
+      - run: bun audit
+      - name: Build and exercise Unix installer
+        if: runner.os != 'Windows'
         shell: bash
         run: |
-          bash -n scripts/install-macos.sh
-          test_root="$RUNNER_TEMP/lite-installer-test"
-          mkdir -p "$test_root/home"
-          HOME="$test_root/home" \
-            SHELL=/bin/zsh \
-            LOCALTERMINAL_LITE_HOME="$test_root/app" \
-            LOCALTERMINAL_LITE_BIN_DIR="$test_root/bin" \
-            LOCALTERMINAL_LITE_ARCHIVE_URL="https://github.com/$GITHUB_REPOSITORY/archive/$GITHUB_SHA.tar.gz" \
+          set -euo pipefail
+          root="$RUNNER_TEMP/lite-installer-test"
+          rm -rf "$root"
+          mkdir -p "$root/release" "$root/home" "$root/downloads"
+          bun build --compile --minify src/cli.ts --outfile "$root/release/localterminal-lite"
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
+            asset="localterminal-lite-darwin-$( [[ "$(uname -m)" == arm64 ]] && echo arm64 || echo x64 ).tar.gz"
+            cp scripts/mac-one-shot-awake-lock.swift "$root/release/mac-one-shot-awake-lock.swift"
+            tar -czf "$root/$asset" -C "$root/release" localterminal-lite mac-one-shot-awake-lock.swift
+          else
+            asset="localterminal-lite-linux-x64.tar.gz"
+            tar -czf "$root/$asset" -C "$root/release" localterminal-lite
+          fi
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$root/$asset" | awk -v a="$asset" '{print $1 "  " a}' > "$root/$asset.sha256"
+          else
+            shasum -a 256 "$root/$asset" | awk -v a="$asset" '{print $1 "  " a}' > "$root/$asset.sha256"
+          fi
+          head -c 4096 "$root/$asset" > "$root/downloads/$asset.part"
+          installer="scripts/install-linux.sh"
+          [[ "${{ runner.os }}" == "macOS" ]] && installer="scripts/install-macos.sh"
+          HOME="$root/home" SHELL=/bin/bash \
+            LOCALTERMINAL_LITE_HOME="$root/app" \
+            LOCALTERMINAL_LITE_BIN_DIR="$root/bin" \
+            LOCALTERMINAL_LITE_DOWNLOAD_DIR="$root/downloads" \
+            LOCALTERMINAL_LITE_ASSET_URL="file://$root/$asset" \
+            LOCALTERMINAL_LITE_CHECKSUM_URL="file://$root/$asset.sha256" \
             LOCALTERMINAL_LITE_INSTALL_ONLY=1 \
-            bash scripts/install-macos.sh
-          test -x "$test_root/bin/localterminal-lite"
-          grep -Fq "$test_root/app" "$test_root/bin/localterminal-lite"
-          grep -Fq "$test_root/bin" "$test_root/home/.zprofile"
-          PATH="$test_root/bin:$PATH" command -v localterminal-lite
-      - name: Validate and exercise Windows installer
+            bash "$installer"
+          "$root/bin/localterminal-lite" --help | grep -Fq 'v1.1.0'
+          "$root/bin/localterminal-lite" --verify-installation
+          mkdir -p "$root/incomplete/releases"
+          HOME="$root/home" SHELL=/bin/bash \
+            LOCALTERMINAL_LITE_HOME="$root/incomplete" \
+            LOCALTERMINAL_LITE_BIN_DIR="$root/bin2" \
+            LOCALTERMINAL_LITE_DOWNLOAD_DIR="$root/downloads2" \
+            LOCALTERMINAL_LITE_ASSET_URL="file://$root/$asset" \
+            LOCALTERMINAL_LITE_CHECKSUM_URL="file://$root/$asset.sha256" \
+            LOCALTERMINAL_LITE_INSTALL_ONLY=1 \
+            bash "$installer"
+          "$root/bin2/localterminal-lite" --verify-installation
+      - name: Build and exercise Windows installer
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $tokens = $null
-          $errors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile(
-            "scripts/install-windows.ps1",
-            [ref]$tokens,
-            [ref]$errors
-          ) > $null
-          if ($errors.Count) {
-            $errors | ForEach-Object { Write-Error $_.Message }
-            exit 1
-          }
-          $testRoot = Join-Path $env:RUNNER_TEMP "lite-installer-test"
-          $env:LOCALTERMINAL_LITE_HOME = Join-Path $testRoot "app"
-          $env:LOCALTERMINAL_LITE_BIN_DIR = Join-Path $testRoot "bin"
-          $env:LOCALTERMINAL_LITE_ARCHIVE_URL = "https://github.com/$env:GITHUB_REPOSITORY/archive/$env:GITHUB_SHA.zip"
-          $env:LOCALTERMINAL_LITE_INSTALL_ONLY = "1"
+          $ErrorActionPreference = 'Stop'
+          $tokens = $null; $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile('scripts/install-windows.ps1',[ref]$tokens,[ref]$errors) > $null
+          if ($errors.Count) { $errors | ForEach-Object { Write-Error $_.Message }; exit 1 }
+          $root = Join-Path $env:RUNNER_TEMP 'lite-installer-test'
+          Remove-Item $root -Recurse -Force -ErrorAction SilentlyContinue
+          $release = Join-Path $root 'release'
+          $downloads = Join-Path $root 'downloads'
+          New-Item -ItemType Directory -Force -Path $release,$downloads | Out-Null
+          $exe = Join-Path $release 'localterminal-lite.exe'
+          bun build --compile --minify src/cli.ts --outfile $exe
+          if ($LASTEXITCODE -ne 0) { throw 'Windows binary build failed' }
+          $asset = 'localterminal-lite-windows-x64.zip'
+          $archive = Join-Path $root $asset
+          Compress-Archive -LiteralPath $exe -DestinationPath $archive -Force
+          $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          "$hash  $asset" | Set-Content -Encoding Ascii "$archive.sha256"
+          $allBytes = [IO.File]::ReadAllBytes($archive)
+          [IO.File]::WriteAllBytes((Join-Path $downloads "$asset.part"), $allBytes[0..4095])
+          $env:LOCALTERMINAL_LITE_HOME = Join-Path $root 'app'
+          $env:LOCALTERMINAL_LITE_BIN_DIR = Join-Path $root 'bin'
+          $env:LOCALTERMINAL_LITE_DOWNLOAD_DIR = $downloads
+          $env:LOCALTERMINAL_LITE_ASSET_URL = ([Uri](Resolve-Path $archive).Path).AbsoluteUri
+          $env:LOCALTERMINAL_LITE_CHECKSUM_URL = ([Uri](Resolve-Path "$archive.sha256").Path).AbsoluteUri
+          $env:LOCALTERMINAL_LITE_INSTALL_ONLY = '1'
           & scripts/install-windows.ps1
-          if (-not (Test-Path (Join-Path $env:LOCALTERMINAL_LITE_BIN_DIR "localterminal-lite.cmd"))) {
-            throw "The global command launcher was not created."
-          }
-          if (-not (([Environment]::GetEnvironmentVariable("Path", "User") -split ';') -contains $env:LOCALTERMINAL_LITE_BIN_DIR)) {
-            throw "The launcher directory was not persisted to the user PATH."
-          }
-      - run: bun run typecheck
-      - run: bun run test
+          & (Join-Path $env:LOCALTERMINAL_LITE_BIN_DIR 'localterminal-lite.ps1') --help | Select-String 'v1.1.0'
+          & (Join-Path $env:LOCALTERMINAL_LITE_BIN_DIR 'localterminal-lite.ps1') --verify-installation
+          $env:LOCALTERMINAL_LITE_HOME = Join-Path $root 'incomplete'
+          New-Item -ItemType Directory -Force -Path (Join-Path $env:LOCALTERMINAL_LITE_HOME 'releases') | Out-Null
+          $env:LOCALTERMINAL_LITE_BIN_DIR = Join-Path $root 'bin2'
+          $env:LOCALTERMINAL_LITE_DOWNLOAD_DIR = Join-Path $root 'downloads2'
+          & scripts/install-windows.ps1
+          & (Join-Path $env:LOCALTERMINAL_LITE_BIN_DIR 'localterminal-lite.ps1') --verify-installation
