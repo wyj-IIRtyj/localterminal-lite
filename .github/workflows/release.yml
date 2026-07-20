@@ -43,6 +43,7 @@ jobs:
           bun-version: latest
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
+      - run: bun run build
       - run: bun test --timeout 120000 test/*.test.mjs
         shell: bash
       - name: Build standalone executable
