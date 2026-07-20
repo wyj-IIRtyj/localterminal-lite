@@ -35,6 +35,7 @@ export function App({ controller, onExit }: { controller: TuiController; onExit:
   const credentialRevealDeadline = useRef(0);
   const [showAudit, setShowAudit] = useState(false);
   const [logPage, setLogPage] = useState(0);
+  const [logAnchorAt, setLogAnchorAt] = useState<string>();
   const [form, setForm] = useState<FormState>();
   const [notice, setNotice] = useState<string>();
   const [fatalError, setFatalError] = useState<Error>();
@@ -98,7 +99,7 @@ export function App({ controller, onExit }: { controller: TuiController; onExit:
     refresh();
   }, [controller, refresh]);
 
-  const switchTab = useCallback((index: number) => { setRevealCredentials(false); setDetail(undefined); if (index !== 6) setLogPage(0); setTab(index); }, []);
+  const switchTab = useCallback((index: number) => { setRevealCredentials(false); setDetail(undefined); if (index !== 6) { setLogPage(0); setLogAnchorAt(undefined); } setTab(index); }, []);
   const nextTab = useCallback((delta: number) => { setRevealCredentials(false); setDetail(undefined); setTab((value) => (value + TABS.length + delta) % TABS.length); }, []);
   const back = useCallback(() => { setRevealCredentials(false); setDetail(undefined); }, []);
   const quit = useCallback(async () => {
@@ -188,8 +189,19 @@ export function App({ controller, onExit }: { controller: TuiController; onExit:
   useKeyboard((event) => {
     if (fatalError && (event.name === 'q' || event.name === 'escape')) { void quit(); return; }
     if (!form && !detail && tab === 6 && event.eventType !== 'release') {
-      if (event.name === 'pagedown') { setLogPage((value) => value + 1); return; }
-      if (event.name === 'pageup') { setLogPage((value) => Math.max(0, value - 1)); return; }
+      if (event.name === 'pagedown') {
+        setLogAnchorAt((value) => value || new Date().toISOString());
+        setLogPage((value) => value + 1);
+        return;
+      }
+      if (event.name === 'pageup') {
+        setLogPage((value) => {
+          const next = Math.max(0, value - 1);
+          if (next === 0) setLogAnchorAt(undefined);
+          return next;
+        });
+        return;
+      }
     }
     const eligible = !form && !detail && [0, 5].includes(tab);
     if (event.eventType === 'release') credentialRevealDeadline.current = 0;
@@ -220,7 +232,7 @@ export function App({ controller, onExit }: { controller: TuiController; onExit:
             : tab === 3 ? <DiffScreen snapshot={diff} theme={theme} zh={zh} />
               : tab === 4 ? <Extensions state={state} selected={activeSelection} theme={theme} zh={zh} onSelect={selectItem} />
                 : tab === 5 ? <Settings runtime={runtime} theme={theme} zh={zh} reveal={revealCredentials} update={update} />
-                  : <Logs runtime={runtime} logs={logs} theme={theme} zh={zh} showAudit={showAudit} page={logPage} />;
+                  : <Logs runtime={runtime} logs={logs} theme={theme} zh={zh} showAudit={showAudit} page={logPage} anchorAt={logAnchorAt} />;
 
   const scrollKey = `${tab}-${detail?.kind || 'page'}-${detail?.id || ''}`;
   return (

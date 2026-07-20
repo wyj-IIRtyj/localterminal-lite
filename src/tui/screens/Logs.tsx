@@ -46,10 +46,11 @@ function RuntimeRow({ entry, theme }: { entry: DisplayEntry; theme: Theme }) {
 
 const PAGE_SIZE = 100;
 
-export function Logs({ runtime, logs, theme, zh, showAudit, page }: { runtime: LiteRuntime; logs: RuntimeLog[]; theme: Theme; zh: boolean; showAudit: boolean; page: number }) {
-  const localEnd = Math.max(0, logs.length - page * PAGE_SIZE);
+export function Logs({ runtime, logs, theme, zh, showAudit, page, anchorAt }: { runtime: LiteRuntime; logs: RuntimeLog[]; theme: Theme; zh: boolean; showAudit: boolean; page: number; anchorAt?: string }) {
+  const anchoredLogs = anchorAt ? logs.filter((entry) => entry.at <= anchorAt) : logs;
+  const localEnd = Math.max(0, anchoredLogs.length - page * PAGE_SIZE);
   const localStart = Math.max(0, localEnd - PAGE_SIZE);
-  const entries: DisplayEntry[] = logs.slice(localStart, localEnd).map((entry) => ({
+  const entries: DisplayEntry[] = anchoredLogs.slice(localStart, localEnd).map((entry) => ({
     at: entry.at,
     kind: 'runtime',
     level: entry.level,
@@ -58,7 +59,7 @@ export function Logs({ runtime, logs, theme, zh, showAudit, page }: { runtime: L
   }));
   const currentWorkspaceId = workspaceId(runtime.config.workspaceDir);
   try {
-    for (const group of readWorkspaceLogs(path.dirname(runtime.config.settingsPath), PAGE_SIZE, page * PAGE_SIZE)) {
+    for (const group of readWorkspaceLogs(path.dirname(runtime.config.settingsPath), PAGE_SIZE, page * PAGE_SIZE, anchorAt)) {
       if (group.workspace.id === currentWorkspaceId) continue;
       if (group.workspace.lastHost !== runtime.config.host || group.workspace.lastPort !== runtime.config.port) continue;
       const label = group.workspace.label || path.basename(group.workspace.workspaceDir) || group.workspace.id;
@@ -69,15 +70,18 @@ export function Logs({ runtime, logs, theme, zh, showAudit, page }: { runtime: L
       }
     }
   } catch { /* cross-workspace logs are best effort */ }
-  if (showAudit) for (const fact of runtime.store.auditFacts(PAGE_SIZE * (page + 1)).slice(page * PAGE_SIZE)) entries.push({
+  if (showAudit) {
+    const audit = runtime.store.auditFacts(PAGE_SIZE * (page + 1) + 5000).filter((fact) => !anchorAt || fact.at <= anchorAt);
+    for (const fact of audit.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE)) entries.push({
     at: fact.at,
     kind: 'audit',
     level: fact.ok ? 'ok' : 'error',
     operation: fact.tool,
     subject: fact.sessionName,
     detail: fact.ok ? JSON.stringify(fact.args) : `${fact.errorCode || 'ERROR'} · ${JSON.stringify(fact.args)}`,
-    duration: fact.durationMs,
-  });
+      duration: fact.durationMs,
+    });
+  }
   entries.sort((a, b) => b.at.localeCompare(a.at));
   const visibleEntries = entries.slice(0, PAGE_SIZE);
   return (

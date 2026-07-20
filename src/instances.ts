@@ -138,11 +138,16 @@ function readTailLines(file: string, limit: number, offset = 0): string[] {
   } finally { closeSync(fd); }
 }
 
-export function readWorkspaceLogs(configDir: string, limitPerWorkspace = 500, offsetPerWorkspace = 0): Array<{ workspace: WorkspaceRecord; entries: unknown[] }> {
+export function readWorkspaceLogs(configDir: string, limitPerWorkspace = 500, offsetPerWorkspace = 0, beforeAt?: string): Array<{ workspace: WorkspaceRecord; entries: unknown[] }> {
   return readWorkspaceRegistry(configDir).map((workspace) => {
     const file = path.join(workspace.stateDir, 'runtime.jsonl');
-    const lines = readTailLines(file, limitPerWorkspace, offsetPerWorkspace);
-    return { workspace, entries: lines.flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } }) };
+    const requested = beforeAt ? Math.max(limitPerWorkspace + offsetPerWorkspace, 5000) : limitPerWorkspace + offsetPerWorkspace;
+    const files = [3, 2, 1].map((index) => `${file}.${index}`).concat(file);
+    const parsed = files.flatMap((candidate) => readTailLines(candidate, requested, 0))
+      .flatMap((line) => { try { return [JSON.parse(line) as { at?: string }]; } catch { return []; } });
+    const filtered = beforeAt ? parsed.filter((entry) => !entry.at || entry.at <= beforeAt) : parsed;
+    const end = Math.max(0, filtered.length - offsetPerWorkspace);
+    return { workspace, entries: filtered.slice(Math.max(0, end - limitPerWorkspace), end) };
   });
 }
 
