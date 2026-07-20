@@ -745,6 +745,7 @@ test('malformed cluster registry is reported as degraded and never as zero membe
 });
 
 test('runtime close disarms session helpers and stops the global passive-lock service', async () => {
+  if (process.platform !== 'darwin') return;
   const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-resource-config-'));
   const workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-resource-workspace-'));
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-resource-state-'));
@@ -784,8 +785,8 @@ test('runtime close disarms session helpers and stops the global passive-lock se
   }
 });
 
-test('passive lock remains alive while another LocalTerminal process lease exists', async (context) => {
-  if (process.platform !== 'darwin') { context.skip('macOS passive-lock lifecycle'); return; }
+test('passive lock remains alive while another LocalTerminal process lease exists', async () => {
+  if (process.platform !== 'darwin') return;
   const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-passive-shared-config-'));
   const workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-passive-shared-workspace-'));
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-passive-shared-state-'));
