@@ -14,11 +14,16 @@ import { conversationGroups, logicalSessionGroups, selectedViewport } from '../d
 import { phaseColor, presenceColor, themeFor } from '../dist/tui/state.js';
 import { initialQuestionState, nextTextValue, optionAnswer, toggleSelectedOption, workspaceChoiceQuestion, workspaceOptionLabel } from '../dist/tui/form-model.js';
 import { createDefaultSettings, loadLiteConfig, readLiteSettings, saveLiteSettings, settingsPath, validateSettingsFeasibility } from '../dist/config.js';
-import { appendWorkspaceLog, findAvailablePort, readWorkspaceLogs, readWorkspaceRegistry, resolveWorkspaceInput, workspaceChoiceHint, workspaceId } from '../dist/instances.js';
+import { activeWorkspaceRuntimePids, appendWorkspaceLog, findAvailablePort, readWorkspaceLogs, readWorkspaceRegistry, resolveWorkspaceInput, upsertWorkspaceRecord, workspaceChoiceHint, workspaceId } from '../dist/instances.js';
 import { migrateWorkspaceState } from '../dist/migration.js';
 import { checkForUpdate, isNewerVersion } from '../dist/update.js';
 import { PortClusterRegistry, tokenHash } from '../dist/cluster.js';
 import { disarmAllSessionResources, disarmSessionResources, passiveLockStatus } from '../dist/session-resources.js';
+import { selectedWorkspace, workspaceSelectionIndex, workspaceSelectionItems } from '../dist/workspace-selection.js';
+import { runtimeSettingsSnapshot } from '../dist/runtime-settings.js';
+import { buildWorkspaceSelectorModel } from '../dist/tui/workspace-selector.js';
+import { WorkspaceCatalog } from '../dist/workspace-catalog.js';
+import { nextCredentialVisibility } from '../dist/tui/credential-visibility.js';
 
 const CONNECTOR_KEY = 'test-connector-key-1234567890';
 const ACTIONS_TOKEN = 'test-actions-token-12345678901234567890';
@@ -191,6 +196,26 @@ test('workspace profiles isolate state and aggregate local logs', async () => {
   }
 });
 
+test('workspace registry preserves concurrent process updates', async () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-workspace-registry-concurrent-'));
+  try {
+    const workers = Array.from({ length: 12 }, (_, index) => new Promise((resolve, reject) => {
+      const workspaceDir = path.join(configDir, `workspace-${index}`);
+      fs.mkdirSync(workspaceDir, { recursive: true });
+      const code = `import { upsertWorkspaceRecord, workspaceId, workspaceStateDir } from ${JSON.stringify(new URL('../dist/instances.js', import.meta.url).href)}; const configDir=${JSON.stringify(configDir)}; const workspaceDir=${JSON.stringify(workspaceDir)}; upsertWorkspaceRecord(configDir,{id:workspaceId(workspaceDir),workspaceDir,stateDir:workspaceStateDir(configDir,workspaceDir),lastSeenAt:new Date().toISOString()});`;
+      const child = spawn(process.execPath, ['--input-type=module', '-e', code], { stdio: 'ignore' });
+      child.once('error', reject);
+      child.once('exit', (exitCode) => exitCode === 0 ? resolve() : reject(new Error(`workspace registry worker exited ${exitCode}`)));
+    }));
+    await Promise.all(workers);
+    const records = readWorkspaceRegistry(configDir);
+    assert.equal(records.length, 12);
+    assert.equal(new Set(records.map((item) => item.id)).size, 12);
+  } finally {
+    fs.rmSync(configDir, { recursive: true, force: true });
+  }
+});
+
 test('port conflict helpers choose a different available port', async () => {
   const blocker = net.createServer();
   await new Promise((resolve, reject) => {
@@ -316,7 +341,14 @@ test('three workspaces share one port, route by workspace and session, and survi
     assert.equal(namesB.includes('workspace-b-root'), true);
     assert.equal(namesB.includes('workspace-c-root'), false);
 
+    let leaderAcceptedTrafficWhenUnregistered;
+    const originalUnregister = runtimes[0].cluster.unregister.bind(runtimes[0].cluster);
+    runtimes[0].cluster.unregister = () => {
+      leaderAcceptedTrafficWhenUnregistered = Boolean(runtimes[0].publicServer?.listening);
+      return originalUnregister();
+    };
     await runtimes[0].close();
+    assert.equal(leaderAcceptedTrafficWhenUnregistered, false, 'leader must stop public traffic before removing its workspace registration');
     const deadline = Date.now() + 8000;
     let recovered;
     while (Date.now() < deadline) {
@@ -410,7 +442,20 @@ test('startup usability gates keep workspace options scrollable and cancellation
   assert.match(cli, /error instanceof StartupCancelled/);
   assert.doesNotMatch(state, /Registered workspaces:/);
   assert.doesNotMatch(state, /已登记工作区：/);
-  assert.match(state, /workspaceChoiceQuestion\(/);
+  assert.match(state, /buildWorkspaceSelectorModel\(/);
+});
+
+test('consecutive form requests remount and reset request-local state', () => {
+  const app = fs.readFileSync(path.join(process.cwd(), 'src/tui/App.tsx'), 'utf8');
+  const dialog = fs.readFileSync(path.join(process.cwd(), 'src/tui/components/FormDialog.tsx'), 'utf8');
+  assert.match(app, /id: number/);
+  assert.match(app, /nextFormId\.current \+= 1/);
+  assert.match(app, /setForm\(\{ id: nextFormId\.current, questions, preamble, resolve \}\)/);
+  assert.match(app, /<FormDialog key=\{form\.id\}/);
+  assert.match(dialog, /setIndex\(0\)/);
+  assert.match(dialog, /setAnswers\(\[\]\)/);
+  assert.match(dialog, /applyQuestionState\(0\)/);
+  assert.match(dialog, /\}, \[questions\]\)/);
 });
 
 test('form option state submits the latest multi-select values and resets between questions', () => {
@@ -438,6 +483,124 @@ test('form option state submits the latest multi-select values and resets betwee
   assert.deepEqual(workspaceQuestion.optionBadges[0], { label: 'inactive', tone: 'muted' });
 });
 
+test('workspace runtime leases follow repeated switches and never leak to previous workspaces', async () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-workspace-switch-leases-'));
+  const settingsFile = path.join(configDir, 'settings.json');
+  const dirs = ['A', 'B', 'C'].map((name) => {
+    const workspaceDir = path.join(configDir, name);
+    const stateDir = path.join(configDir, 'state', name);
+    fs.mkdirSync(workspaceDir, { recursive: true });
+    return { workspaceDir, stateDir };
+  });
+  const makeRuntime = (entry) => new LiteRuntime({ ...entry, settingsPath: settingsFile, host: '127.0.0.1', port: 0, connectorKey: CONNECTOR_KEY, actionsToken: ACTIONS_TOKEN, publicBaseUrl: '', maxOutputChars: 20_000, commandTimeoutSec: 10, uiLanguage: 'zh-CN', uiTheme: 'dark', passiveLockEnabled: false });
+  try {
+    for (const index of [0, 1, 2, 0]) {
+      const runtime = makeRuntime(dirs[index]);
+      await runtime.start();
+      const records = readWorkspaceRegistry(configDir);
+      const active = records.filter((record) => record.lastPid === process.pid);
+      assert.equal(active.length, 1);
+      assert.equal(active[0].workspaceDir, dirs[index].workspaceDir);
+      assert.equal(active[0].lastPort, runtime.port);
+      await runtime.close();
+      assert.equal(readWorkspaceRegistry(configDir).filter((record) => record.lastPid === process.pid).length, 0);
+    }
+    const records = readWorkspaceRegistry(configDir);
+    const startup = buildWorkspaceSelectorModel({ label: '选择工作区', records, currentWorkspaceDir: dirs[0].workspaceDir, zh: true });
+    const settings = buildWorkspaceSelectorModel({ label: '工作区', records, currentWorkspaceDir: dirs[0].workspaceDir, currentRuntime: { workspaceDir: dirs[0].workspaceDir, host: '127.0.0.1', port: 3101, pid: process.pid }, zh: true });
+    assert.deepEqual(startup.question.optionLabels, settings.question.optionLabels);
+    assert.deepEqual(startup.question.optionDescriptions, settings.question.optionDescriptions);
+    assert.equal(new Set(startup.question.optionLabels).size, 3);
+    assert.deepEqual(startup.question.optionLabels, ['A', 'B', 'C']);
+    assert.ok(startup.items.every((item) => item.activity === 'inactive'));
+    assert.equal(settings.items[0].activity, 'current');
+    assert.ok(settings.items.slice(1).every((item) => item.activity === 'inactive'));
+  } finally {
+    fs.rmSync(configDir, { recursive: true, force: true });
+  }
+});
+
+test('runtime, startup, setup, and settings share one workspace catalog source without path fallback', async () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-workspace-catalog-source-'));
+  const workspaceDir = path.join(configDir, 'current');
+  const otherDir = path.join(configDir, 'other');
+  const stateDir = path.join(configDir, 'state-current');
+  fs.mkdirSync(workspaceDir, { recursive: true });
+  fs.mkdirSync(otherDir, { recursive: true });
+  const settingsPath = path.join(configDir, 'config.json');
+  const catalog = new WorkspaceCatalog(configDir);
+  upsertWorkspaceRecord(configDir, { id: workspaceId(workspaceDir), workspaceDir, stateDir, lastSeenAt: new Date().toISOString() });
+  upsertWorkspaceRecord(configDir, { id: workspaceId(otherDir), workspaceDir: otherDir, stateDir: path.join(configDir, 'state-other'), lastSeenAt: new Date().toISOString() });
+  const runtime = new LiteRuntime({ workspaceDir, stateDir, settingsPath, host: '127.0.0.1', port: 0, connectorKey: CONNECTOR_KEY, actionsToken: ACTIONS_TOKEN, publicBaseUrl: '', maxOutputChars: 20_000, commandTimeoutSec: 10, uiLanguage: 'zh-CN', uiTheme: 'dark', passiveLockEnabled: false });
+  try {
+    assert.equal(runtime.workspaceCatalog.configDir, catalog.configDir);
+    assert.deepEqual(runtime.workspaceCatalog.snapshot().map((item) => item.workspaceDir), catalog.snapshot().map((item) => item.workspaceDir));
+    const stateSource = fs.readFileSync(path.join(process.cwd(), 'src/tui/state.ts'), 'utf8');
+    const setupSource = fs.readFileSync(path.join(process.cwd(), 'src/tui/Setup.tsx'), 'utf8');
+    const cliSource = fs.readFileSync(path.join(process.cwd(), 'src/cli.ts'), 'utf8');
+    assert.match(stateSource, /this\.currentRuntime\.workspaceCatalog\.snapshot\(\)/);
+    assert.doesNotMatch(stateSource, /Workspace path.*fallback: current\.workspaceDir/);
+    assert.doesNotMatch(stateSource, /readWorkspaceRegistry\(path\.dirname\(settingsPath\(\)\)\)/);
+    assert.match(setupSource, /records: WorkspaceRecord\[\]/);
+    assert.doesNotMatch(setupSource, /readWorkspaceRegistry\(/);
+    assert.match(cliSource, /new WorkspaceCatalog\(path\.dirname\(settingsPath\(env\)\)\)/);
+  } finally {
+    await runtime.close();
+    fs.rmSync(configDir, { recursive: true, force: true });
+  }
+});
+
+test('workspace selection uses one runtime-aware model across startup and settings', async () => {
+  const workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-workspace-current-'));
+  const otherDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-workspace-other-'));
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  try {
+    const records = [
+      { id: workspaceId(workspaceDir), workspaceDir, stateDir: path.join(workspaceDir, '.state'), lastPid: 999999, lastPort: 1111, lastHost: 'stale-host', lastSeenAt: new Date().toISOString() },
+      { id: workspaceId(otherDir), workspaceDir: otherDir, stateDir: path.join(otherDir, '.state'), lastPid: child.pid, lastPort: 4242, lastHost: '127.0.0.1', lastSeenAt: new Date().toISOString() },
+    ];
+    const items = workspaceSelectionItems(records, { workspaceDir, host: '127.0.0.1', port: 3131, pid: process.pid }, true);
+    assert.equal(items.length, 2);
+    assert.equal(items[0].activity, 'current');
+    assert.equal(items[0].disabled, false);
+    assert.match(items[0].status, /当前进程运行中/);
+    assert.match(items[0].status, /127\.0\.0\.1:3131/);
+    assert.equal(items[1].activity, 'active');
+    assert.equal(items[1].disabled, true);
+    assert.match(items[1].status, /其他进程运行中/);
+    assert.equal(workspaceSelectionIndex(items, workspaceDir), 0);
+    assert.equal(selectedWorkspace(items, '2')?.workspaceDir, otherDir);
+    const question = workspaceChoiceQuestion('Workspace', items, 0);
+    assert.deepEqual(question.optionDisabled, [false, true]);
+    assert.equal(question.optionBadges[0].tone, 'good');
+    assert.equal(question.optionBadges[1].tone, 'warn');
+
+    const cli = fs.readFileSync(path.join(process.cwd(), 'src/cli.ts'), 'utf8');
+    const state = fs.readFileSync(path.join(process.cwd(), 'src/tui/state.ts'), 'utf8');
+    assert.doesNotMatch(cli, /records\.filter\(\(record\) => !isWorkspaceRecordActive/);
+    assert.match(cli, /runWorkspaceChooserTui\(records,/);
+    assert.match(state, /runtimeSettingsSnapshot\(this\.currentRuntime, persisted\)/);
+    assert.match(state, /buildWorkspaceSelectorModel\(/);
+    const effective = runtimeSettingsSnapshot({
+      port: 3131,
+      config: { schemaVersion: 1, workspaceDir, stateDir: '', settingsPath: '', host: '127.0.0.1', port: 0, connectorKey: CONNECTOR_KEY, actionsToken: ACTIONS_TOKEN, publicBaseUrl: '', maxOutputChars: 20_000, commandTimeoutSec: 10, uiLanguage: 'en', uiTheme: 'dark', passiveLockEnabled: false },
+    });
+    assert.equal(effective.port, 3131);
+    assert.equal(effective.workspaceDir, workspaceDir);
+  } finally {
+    child.kill('SIGTERM');
+    fs.rmSync(workspaceDir, { recursive: true, force: true });
+    fs.rmSync(otherDir, { recursive: true, force: true });
+  }
+});
+
+test('credential reveal fails closed on every release packet', () => {
+  assert.equal(nextCredentialVisibility(false, { name: 'v', eventType: 'press' }, true), true);
+  assert.equal(nextCredentialVisibility(true, { name: '', eventType: 'release' }, true), false);
+  assert.equal(nextCredentialVisibility(true, { name: 'unknown', eventType: 'release' }, true), false);
+  assert.equal(nextCredentialVisibility(true, { name: 'v', eventType: 'repeat' }, false), false);
+});
+
 test('workspace cards render status as an independent badge and require explicit mouse confirmation', () => {
   const formDialog = fs.readFileSync(path.join(process.cwd(), 'src/tui/components/FormDialog.tsx'), 'utf8');
   const model = fs.readFileSync(path.join(process.cwd(), 'src/tui/form-model.ts'), 'utf8');
@@ -450,6 +613,29 @@ test('workspace cards render status as an independent badge and require explicit
   assert.match(formDialog, /first click selects, second click confirms/);
   assert.match(formDialog, /badges\[position\]\.label/);
   assert.match(formDialog, /descriptions\[position\]/);
+});
+
+test('process topology reports shared-port member count and leader role', async () => {
+  const port = await findAvailablePort('127.0.0.1', 39000);
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-topology-config-'));
+  const runtimes = [];
+  try {
+    for (const name of ['one', 'two']) {
+      const workspaceDir = path.join(configDir, name);
+      const stateDir = path.join(configDir, `state-${name}`);
+      fs.mkdirSync(workspaceDir, { recursive: true });
+      const runtime = new LiteRuntime({ workspaceDir, stateDir, settingsPath: path.join(configDir, 'settings.json'), host: '127.0.0.1', port, connectorKey: CONNECTOR_KEY, actionsToken: ACTIONS_TOKEN, publicBaseUrl: `http://127.0.0.1:${port}`, maxOutputChars: 20_000, commandTimeoutSec: 10, uiLanguage: 'zh-CN', uiTheme: 'dark', passiveLockEnabled: false });
+      await runtime.start(); runtimes.push(runtime);
+    }
+    const topology = runtimes.map((runtime) => runtime.processTopology());
+    assert.deepEqual(topology.map((item) => item.memberCount), [2, 2]);
+    assert.equal(topology.filter((item) => item.role === 'leader').length, 1);
+    assert.equal(topology.filter((item) => item.role === 'member').length, 1);
+    assert.ok(topology.every((item) => item.sharedPort === port));
+  } finally {
+    for (const runtime of runtimes.reverse()) await runtime.close();
+    fs.rmSync(configDir, { recursive: true, force: true });
+  }
 });
 
 test('runtime close disarms session helpers and stops the global passive-lock service', async () => {
@@ -486,6 +672,35 @@ test('runtime close disarms session helpers and stops the global passive-lock se
   } finally {
     for (const child of sessionChildren) child.kill('SIGKILL');
     passiveChild.kill('SIGKILL');
+    fs.rmSync(configDir, { recursive: true, force: true });
+    fs.rmSync(workspaceDir, { recursive: true, force: true });
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test('passive lock remains alive while another LocalTerminal process lease exists', async (context) => {
+  if (process.platform !== 'darwin') { context.skip('macOS passive-lock lifecycle'); return; }
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-passive-shared-config-'));
+  const workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-passive-shared-workspace-'));
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-passive-shared-state-'));
+  const settingsPath = path.join(configDir, 'settings.json');
+  const peer = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  const passiveChild = spawn(process.execPath, ['-e', "process.title='LocalTerminalLitePassiveLock'; setInterval(() => {}, 1000)"], { stdio: 'ignore' });
+  const passiveDirectory = path.join(configDir, 'passive-lock');
+  fs.mkdirSync(passiveDirectory, { recursive: true });
+  fs.writeFileSync(path.join(passiveDirectory, 'passive-lock.pid'), `${passiveChild.pid}\n`);
+  fs.writeFileSync(path.join(passiveDirectory, 'passive-lock.log'), `${new Date().toISOString()} standby_requested\n`);
+  const peerWorkspace = path.join(configDir, 'peer'); fs.mkdirSync(peerWorkspace, { recursive: true });
+  upsertWorkspaceRecord(configDir, { id: workspaceId(peerWorkspace), workspaceDir: peerWorkspace, stateDir: path.join(configDir, 'peer-state'), lastPid: peer.pid, lastHost: '127.0.0.1', lastPort: 3101, lastSeenAt: new Date().toISOString() });
+  const config = { workspaceDir, stateDir, settingsPath, host: '127.0.0.1', port: 0, connectorKey: CONNECTOR_KEY, actionsToken: ACTIONS_TOKEN, publicBaseUrl: '', maxOutputChars: 20_000, commandTimeoutSec: 10, uiLanguage: 'zh-CN', uiTheme: 'dark', passiveLockEnabled: false };
+  const runtime = new LiteRuntime(config);
+  try {
+    await runtime.start();
+    assert.deepEqual(activeWorkspaceRuntimePids(configDir, process.pid), [peer.pid]);
+    await runtime.close();
+    assert.equal(passiveLockStatus(config).running, true);
+  } finally {
+    peer.kill('SIGKILL'); passiveChild.kill('SIGKILL');
     fs.rmSync(configDir, { recursive: true, force: true });
     fs.rmSync(workspaceDir, { recursive: true, force: true });
     fs.rmSync(stateDir, { recursive: true, force: true });
@@ -593,6 +808,47 @@ test('workspace diff tracker includes tracked and untracked changes while exclud
     const tracker = new WorkspaceDiffTracker({ ...dirs, settingsPath: '', host: '127.0.0.1', port: 0, connectorKey: CONNECTOR_KEY, actionsToken: ACTIONS_TOKEN, publicBaseUrl: '', maxOutputChars: 20_000, commandTimeoutSec: 10, uiLanguage: 'en', uiTheme: 'dark' });
     await tracker.refresh(); const diff = tracker.snapshot(); const text = diff.lines.join('\n');
     assert.match(text, /-hello lite/); assert.match(text, /\+changed lite/); assert.match(text, /diff --git a\/new.txt b\/new.txt/); assert.doesNotMatch(text, /internal.txt/);
+  } finally { fs.rmSync(dirs.workspaceDir, { recursive: true, force: true }); }
+});
+
+test('diff tracker samples large untracked binaries without reading the whole file', async () => {
+  const dirs = tempWorkspace();
+  try {
+    execFileSync('git', ['init'], { cwd: dirs.workspaceDir });
+    execFileSync('git', ['config', 'user.email', 'lite@example.test'], { cwd: dirs.workspaceDir });
+    execFileSync('git', ['config', 'user.name', 'Lite Test'], { cwd: dirs.workspaceDir });
+    execFileSync('git', ['add', 'hello.txt'], { cwd: dirs.workspaceDir });
+    execFileSync('git', ['commit', '-m', 'baseline'], { cwd: dirs.workspaceDir });
+    const sample = path.join(dirs.workspaceDir, 'bun.exe');
+    const descriptor = fs.openSync(sample, 'w');
+    try { fs.writeSync(descriptor, Buffer.from([0, 1, 2, 3]), 0, 4, 0); fs.ftruncateSync(descriptor, 256 * 1024 * 1024); }
+    finally { fs.closeSync(descriptor); }
+    const tracker = new WorkspaceDiffTracker({ ...dirs, settingsPath: '', host: '127.0.0.1', port: 0, connectorKey: CONNECTOR_KEY, actionsToken: ACTIONS_TOKEN, publicBaseUrl: '', maxOutputChars: 20_000, commandTimeoutSec: 10, uiLanguage: 'en', uiTheme: 'dark' });
+    const started = Date.now(); await tracker.refresh(); const elapsed = Date.now() - started;
+    const snapshot = tracker.snapshot();
+    assert.equal(snapshot.error, undefined);
+    assert.match(snapshot.lines.join('\n'), /Binary file bun\.exe is untracked \(268435456 bytes\)/);
+    assert.ok(elapsed < 5_000, `bounded binary sampling took ${elapsed}ms`);
+    fs.rmSync(sample, { force: true });
+    assert.equal(fs.existsSync(sample), false);
+  } finally { fs.rmSync(dirs.workspaceDir, { recursive: true, force: true }); }
+});
+
+test('non-Git workspaces disable diff tracking without crashing or repeated Git failures', async () => {
+  const dirs = tempWorkspace();
+  try {
+    const tracker = new WorkspaceDiffTracker({ ...dirs, settingsPath: '', host: '127.0.0.1', port: 0, connectorKey: CONNECTOR_KEY, actionsToken: ACTIONS_TOKEN, publicBaseUrl: '', maxOutputChars: 20_000, commandTimeoutSec: 10, uiLanguage: 'en', uiTheme: 'dark' }, 10);
+    await tracker.refresh();
+    const first = tracker.snapshot();
+    assert.equal(first.error, undefined);
+    assert.equal(first.unavailableReason, 'not-git-repository');
+    assert.deepEqual(first.lines, []);
+    tracker.start();
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    const later = tracker.snapshot();
+    assert.equal(later.error, undefined);
+    assert.equal(later.unavailableReason, 'not-git-repository');
+    tracker.stop();
   } finally { fs.rmSync(dirs.workspaceDir, { recursive: true, force: true }); }
 });
 
