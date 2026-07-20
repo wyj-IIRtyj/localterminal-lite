@@ -1,4 +1,4 @@
-import type { FormQuestion } from './state.js';
+import type { FormQuestion } from './contracts.js';
 
 export type FormQuestionState = {
   value: string;
@@ -44,7 +44,7 @@ export function workspaceOptionLabel(title: string, workspaceDir: string, status
 
 export function workspaceChoiceQuestion(
   label: string,
-  items: Array<{ title: string; workspaceDir: string; status: string; active?: boolean }>,
+  items: Array<{ title: string; workspaceDir: string; status: string; active?: boolean; disabled?: boolean }>,
   currentIndex = 0,
 ): FormQuestion {
   const options = items.map((_, index) => String(index + 1));
@@ -56,8 +56,9 @@ export function workspaceChoiceQuestion(
     optionDescriptions: items.map((item) => item.workspaceDir),
     optionBadges: items.map((item) => ({
       label: item.status,
-      tone: item.active ? 'good' : 'muted',
+      tone: item.disabled ? 'warn' : item.active ? 'good' : 'muted',
     })),
+    optionDisabled: items.map((item) => Boolean(item.disabled)),
     optionsLayout: 'column',
   };
 }

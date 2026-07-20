@@ -3,20 +3,22 @@ import { maskCredential, readLiteSettings } from '../../config.js';
 import type { Theme } from '../state.js';
 import type { UpdateStatus } from '../../update.js';
 import { Heading, Line } from './shared.js';
+import { runtimeSettingsSnapshot } from '../../runtime-settings.js';
 
 export function Settings({ runtime, theme, zh, reveal, update }: { runtime: LiteRuntime; theme: Theme; zh: boolean; reveal: boolean; update: UpdateStatus }) {
-  const config = runtime.config;
+  const persisted = readLiteSettings();
+  const config = runtimeSettingsSnapshot(runtime, persisted);
   const passiveStatus = runtime.passiveLockStatus();
-  const passiveEnabled = readLiteSettings()?.passiveLockEnabled ?? config.passiveLockEnabled;
+  const passiveEnabled = config.passiveLockEnabled;
   const permissionMissing = /waiting_accessibility_permission|requesting_accessibility_permission|permission_window_visible/.test(passiveStatus.state);
   return (
     <box flexDirection="column" width="100%" padding={1} gap={0}>
       <Heading theme={theme}>{zh ? '运行设置' : 'Runtime settings'}</Heading>
       <Line color={theme.text}>{`${zh ? '界面语言' : 'Language'}: ${config.uiLanguage}`}</Line>
       <Line color={theme.text}>{`${zh ? '界面主题' : 'Theme'}: ${config.uiTheme}`}</Line>
-      <Line color={theme.text}>{`${zh ? '配置文件' : 'Settings file'}: ${config.settingsPath}`}</Line>
+      <Line color={theme.text}>{`${zh ? '配置文件' : 'Settings file'}: ${runtime.config.settingsPath}`}</Line>
       <Line color={theme.text}>{`${zh ? '工作区' : 'Workspace'}: ${config.workspaceDir}`}</Line>
-      <Line color={theme.text}>{`${zh ? '监听地址' : 'Listen'}: ${config.host}:${runtime.port}`}</Line>
+      <Line color={theme.text}>{`${zh ? '监听地址' : 'Listen'}: ${config.host}:${config.port}`}</Line>
       <Line color={theme.text}>{`${zh ? '公网 URL' : 'Public URL'}: ${config.publicBaseUrl}`}</Line>
       <Line color={theme.text}>{`${zh ? '最大输出' : 'Max output'}: ${config.maxOutputChars}`}</Line>
       <Line color={theme.text}>{`${zh ? '命令超时' : 'Timeout'}: ${config.commandTimeoutSec}s`}</Line>

@@ -4,19 +4,18 @@ import { WorkspaceDiffTracker, type DiffSnapshot } from '../diff.js';
 import { logicalSessionGroups } from '../tui-model.js';
 import type { LiteRuntime, RuntimeLog } from '../server.js';
 import type { CustomExtensionSpec, LiteSession, LiteSettings, SessionPhase, StoredState, TaskPackage } from '../types.js';
-import { isDirectory, isValidPublicBaseUrl, maskCredential, readLiteSettings, rotateLiteCredentials, settingsPath, validateSettingsFeasibility } from '../config.js';
-import { describePortOwner, findAvailablePort, isWorkspaceRecordActive, readWorkspaceRegistry, resolveWorkspaceInput, terminatePortOwner } from '../instances.js';
+import { isValidPublicBaseUrl, maskCredential, readLiteSettings, rotateLiteCredentials, validateSettingsFeasibility } from '../config.js';
+import { describePortOwner, findAvailablePort, terminatePortOwner } from '../instances.js';
+import { selectedWorkspace } from '../workspace-selection.js';
+import { buildWorkspaceSelectorModel } from './workspace-selector.js';
 import { checkForUpdate, installUpdate, isSourceCheckout, type UpdateStatus } from '../update.js';
 import { commandPassiveLock, passiveLockStatus } from '../session-resources.js';
-import { workspaceChoiceQuestion } from './form-model.js';
+import { runtimeSettingsSnapshot } from '../runtime-settings.js';
 
 export const TABS = ['Overview', 'Sessions', 'Messages', 'Diff', 'Extensions', 'Settings', 'Logs'] as const;
 export type Tab = (typeof TABS)[number];
-export type Detail = { kind: 'session'; id: string } | { kind: 'conversation'; id: string };
-export type RuntimeReconfigureResult = { runtime: LiteRuntime; error?: string };
-export type RuntimeReconfigure = (settings: LiteSettings) => Promise<RuntimeReconfigureResult>;
-export type FormQuestion = { label: string | ((previous: string[]) => string); fallback?: string; multiline?: boolean; sensitive?: boolean; options?: string[]; optionLabels?: string[]; optionDescriptions?: string[]; optionBadges?: Array<{ label: string; tone?: 'good' | 'warn' | 'muted' }>; optionsLayout?: 'row' | 'column'; multiSelect?: boolean; validate?: (value: string, previous: string[]) => string | undefined | Promise<string | undefined> };
-export type Ask = (questions: FormQuestion[], preamble?: string[]) => Promise<string[] | undefined>;
+export type { Ask, Detail, FormQuestion, RuntimeReconfigure, RuntimeReconfigureResult } from './contracts.js';
+import type { Ask, Detail, FormQuestion, RuntimeReconfigure } from './contracts.js';
 
 export type Theme = {
   background: string;
@@ -309,21 +308,21 @@ export class TuiController {
   async editSettings(ask: Ask): Promise<void> {
     const config = this.currentRuntime.config;
     const persisted = readLiteSettings();
-    const current: LiteSettings = {
-      schemaVersion: 1,
-      workspaceDir: config.workspaceDir,
-      host: config.host,
-      port: config.port,
-      connectorKey: config.connectorKey,
-      actionsToken: config.actionsToken,
-      publicBaseUrl: config.publicBaseUrl,
-      maxOutputChars: config.maxOutputChars,
-      commandTimeoutSec: config.commandTimeoutSec,
-      uiLanguage: config.uiLanguage,
-      uiTheme: config.uiTheme,
-      passiveLockEnabled: persisted?.passiveLockEnabled ?? config.passiveLockEnabled,
-    };
-    const knownWorkspaces = readWorkspaceRegistry(path.dirname(settingsPath()));
+    const current = runtimeSettingsSnapshot(this.currentRuntime, persisted);
+    const knownWorkspaces = this.currentRuntime.workspaceCatalog.snapshot();
+    const workspaceSelector = buildWorkspaceSelectorModel({
+      label: this.text('Workspace', '工作区'),
+      records: knownWorkspaces,
+      currentWorkspaceDir: current.workspaceDir,
+      currentRuntime: {
+        workspaceDir: config.workspaceDir,
+        host: config.host,
+        port: this.currentRuntime.port,
+        pid: process.pid,
+      },
+      zh: config.uiLanguage === 'zh-CN',
+    });
+    const workspaceItems = workspaceSelector.items;
     const passiveStatus = process.platform === 'darwin' ? passiveLockStatus(config) : { state: 'unsupported' };
     const passiveFallback = !current.passiveLockEnabled
       ? 'off'
@@ -343,20 +342,11 @@ export class TuiController {
       if (field === 'language') questions.push({ label: 'UI language', fallback: current.uiLanguage, options: ['zh-CN', 'en'] });
       else if (field === 'theme') questions.push({ label: 'UI theme', fallback: current.uiTheme, options: ['dark', 'light'] });
       else if (field === 'workspace') {
-        const currentWorkspaceIndex = knownWorkspaces.findIndex((item) => path.resolve(item.workspaceDir) === path.resolve(current.workspaceDir));
-        if (knownWorkspaces.length) questions.push(workspaceChoiceQuestion(
-          this.text('Workspace', '工作区'),
-          knownWorkspaces.map((item) => ({
-            title: item.label || path.basename(item.workspaceDir),
-            workspaceDir: item.workspaceDir,
-            status: isWorkspaceRecordActive(item)
-              ? this.text(`active · ${item.lastHost || '127.0.0.1'}:${item.lastPort || '?'} · PID ${item.lastPid || '?'}`, `运行中 · ${item.lastHost || '127.0.0.1'}:${item.lastPort || '?'} · PID ${item.lastPid || '?'}`)
-              : this.text('inactive', '未运行'),
-            active: isWorkspaceRecordActive(item),
-          })),
-          currentWorkspaceIndex,
-        ));
-        else questions.push({ label: this.text('Workspace path', '工作区路径'), fallback: current.workspaceDir, validate: (value) => isDirectory(value) ? undefined : this.text('Workspace must be an accessible directory.', '工作区必须是可访问的目录。') });
+        if (!workspaceItems.length) {
+          this.currentRuntime.log(this.text('Workspace catalog is unavailable; workspace selection cannot continue.', '工作区目录不可用，无法继续选择工作区。'), 'error');
+          return;
+        }
+        questions.push(workspaceSelector.question);
       }
       else if (field === 'host') questions.push({ label: this.text('Listen host', '监听地址'), fallback: current.host, validate: (value) => value.trim() ? undefined : this.text('Host cannot be empty.', '监听地址不能为空。') });
       else if (field === 'port') questions.push({ label: this.text('Listen port', '监听端口'), fallback: String(current.port), validate: (value) => { const port = Number(value); return Number.isInteger(port) && port >= 0 && port <= 65535 ? undefined : this.text('Port must be an integer from 0 to 65535.', '端口必须是 0 到 65535 的整数。'); } });
@@ -373,7 +363,11 @@ export class TuiController {
       const value = answers[index];
       if (field === 'language') next.uiLanguage = value as LiteSettings['uiLanguage'];
       else if (field === 'theme') next.uiTheme = value as LiteSettings['uiTheme'];
-      else if (field === 'workspace') next.workspaceDir = knownWorkspaces.length ? resolveWorkspaceInput(value, knownWorkspaces) : value;
+      else if (field === 'workspace') {
+        const selected = selectedWorkspace(workspaceItems, value);
+        if (!selected) throw new Error('Workspace selection did not resolve to a catalog entry.');
+        next.workspaceDir = selected.workspaceDir;
+      }
       else if (field === 'host') next.host = value;
       else if (field === 'port') next.port = integer(value, current.port);
       else if (field === 'public-url') next.publicBaseUrl = value.toLowerCase() === 'local' ? '' : value.replace(/\/$/, '');

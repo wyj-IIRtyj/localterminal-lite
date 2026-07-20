@@ -36,6 +36,7 @@ export function FormDialog({ questions, preamble, theme, width, height, zh, onCo
   const labels = question?.optionLabels || options;
   const descriptions = question?.optionDescriptions || [];
   const badges = question?.optionBadges || [];
+  const disabled = question?.optionDisabled || [];
 
   const applyQuestionState = (nextIndex: number) => {
     const state = initialQuestionState(questions[nextIndex]);
@@ -51,6 +52,10 @@ export function FormDialog({ questions, preamble, theme, width, height, zh, onCo
   };
 
   const submit = async (raw: string) => {
+    if (question?.options && disabled[optionIndexRef.current]) {
+      setValidation(zh ? '该选项当前不可用。' : 'This option is currently unavailable.');
+      return;
+    }
     const answer = raw.trim() || question?.fallback || '';
     setValidation(undefined);
     if (question?.validate) {
@@ -69,15 +74,20 @@ export function FormDialog({ questions, preamble, theme, width, height, zh, onCo
 
   const moveOption = (delta: number) => {
     if (!options.length) return;
-    const next = (optionIndexRef.current + options.length + delta) % options.length;
+    let next = optionIndexRef.current;
+    for (let attempts = 0; attempts < options.length; attempts += 1) {
+      next = (next + options.length + delta) % options.length;
+      if (!disabled[next]) break;
+    }
     optionIndexRef.current = next;
     mouseArmedOptionRef.current = null;
+    setValidation(undefined);
     setOptionIndex(next);
   };
 
   const toggleCurrent = () => {
     const option = options[optionIndexRef.current];
-    if (!option) return;
+    if (!option || disabled[optionIndexRef.current]) return;
     const next = toggleSelectedOption(selectedOptionsRef.current, option);
     selectedOptionsRef.current = next;
     setSelectedOptions(next);
@@ -99,6 +109,15 @@ export function FormDialog({ questions, preamble, theme, width, height, zh, onCo
       ]),
     ],
   }), [onCancel, question, answers, index, options]);
+
+  useEffect(() => {
+    // FormDialog may receive a new request in the same React batch that resolves
+    // the previous request. Reset all request-local state defensively even
+    // though App also keys the component by form request id.
+    setIndex(0);
+    setAnswers([]);
+    applyQuestionState(0);
+  }, [questions]);
 
   useEffect(() => {
     if (question?.multiline) textareaRef.current?.focus();
@@ -135,9 +154,11 @@ export function FormDialog({ questions, preamble, theme, width, height, zh, onCo
             <box flexDirection={columnOptions ? 'column' : 'row'} flexWrap={columnOptions ? 'no-wrap' : 'wrap'} gap={1} marginTop={1}>
               {options.map((option, position) => {
                 const active = position === optionIndex;
+                const unavailable = Boolean(disabled[position]);
                 const selected = question.multiSelect ? selectedOptions.includes(option) : active;
                 return (
                   <box id={`form-option-${index}-${position}`} key={option} flexDirection="column" width={columnOptions ? '100%' : undefined} paddingLeft={1} paddingRight={1} backgroundColor={active ? theme.selected : theme.panelAlt} onMouseDown={() => {
+                    if (unavailable) { setValidation(zh ? '该选项当前不可用。' : 'This option is currently unavailable.'); return; }
                     const wasArmed = mouseArmedOptionRef.current === position;
                     optionIndexRef.current = position;
                     setOptionIndex(position);
@@ -154,7 +175,7 @@ export function FormDialog({ questions, preamble, theme, width, height, zh, onCo
                     }
                   }}>
                     <box flexDirection="row" justifyContent="space-between" width="100%">
-                      <text fg={active ? theme.selectedText : selected ? theme.good : theme.text} wrapMode="word">{question.multiSelect ? `${selected ? '✓' : '○'} ${labels[position] || option}` : labels[position] || option}</text>
+                      <text fg={unavailable ? theme.muted : active ? theme.selectedText : selected ? theme.good : theme.text} wrapMode="word">{question.multiSelect ? `${selected ? '✓' : '○'} ${labels[position] || option}` : `${unavailable ? '× ' : ''}${labels[position] || option}`}</text>
                       {badges[position] ? (
                         <box paddingLeft={1} paddingRight={1} backgroundColor={theme.panel}>
                           <text fg={badges[position].tone === 'good' ? theme.good : badges[position].tone === 'warn' ? theme.warn : theme.muted}>{badges[position].label}</text>

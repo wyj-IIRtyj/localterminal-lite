@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { conversationGroups, logicalSessionGroups } from '../tui-model.js';
 import { copyToHostClipboard, themeFor, TABS, type Ask, type Detail, type FormQuestion, type TuiController } from './state.js';
 import { useAppKeymap } from './keymap.js';
+import { nextCredentialVisibility } from './credential-visibility.js';
 import { Header } from './components/Header.js';
 import { TabBar } from './components/TabBar.js';
 import { Footer } from './components/Footer.js';
@@ -17,6 +18,7 @@ import { Settings } from './screens/Settings.js';
 import { Logs } from './screens/Logs.js';
 
 type FormState = {
+  id: number;
   questions: FormQuestion[];
   preamble: string[];
   resolve: (answers: string[] | undefined) => void;
@@ -35,6 +37,7 @@ export function App({ controller, onExit }: { controller: TuiController; onExit:
   const [, setRevision] = useState(0);
   const scrollRef = useRef<ScrollBoxRenderable>(null);
   const exiting = useRef(false);
+  const nextFormId = useRef(0);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const snapshot = controller.snapshot();
   const { runtime, state, diff, logs, update } = snapshot;
@@ -57,7 +60,12 @@ export function App({ controller, onExit }: { controller: TuiController; onExit:
   }, [controller, refresh]);
 
   const ask: Ask = useCallback((questions, preamble = []) => new Promise((resolve) => {
-    setForm({ questions, preamble, resolve });
+    // Consecutive forms can be scheduled in the same React batch (Settings
+    // first asks which fields to edit, then immediately asks their values).
+    // A unique key forces a fresh FormDialog so option labels, descriptions,
+    // selected index, answers, and renderables cannot leak from the prior form.
+    nextFormId.current += 1;
+    setForm({ id: nextFormId.current, questions, preamble, resolve });
   }), []);
 
   const completeForm = useCallback((answers: string[]) => {
@@ -78,9 +86,9 @@ export function App({ controller, onExit }: { controller: TuiController; onExit:
     refresh();
   }, [controller, refresh]);
 
-  const switchTab = useCallback((index: number) => { setDetail(undefined); setTab(index); }, []);
-  const nextTab = useCallback((delta: number) => { setDetail(undefined); setTab((value) => (value + TABS.length + delta) % TABS.length); }, []);
-  const back = useCallback(() => setDetail(undefined), []);
+  const switchTab = useCallback((index: number) => { setRevealCredentials(false); setDetail(undefined); setTab(index); }, []);
+  const nextTab = useCallback((delta: number) => { setRevealCredentials(false); setDetail(undefined); setTab((value) => (value + TABS.length + delta) % TABS.length); }, []);
+  const back = useCallback(() => { setRevealCredentials(false); setDetail(undefined); }, []);
   const quit = useCallback(async () => {
     if (exiting.current) return;
     exiting.current = true;
@@ -158,8 +166,11 @@ export function App({ controller, onExit }: { controller: TuiController; onExit:
   }), [form, tab, detail, switchTab, nextTab, back, quit, moveSelection, open, createSessionAction, sessionAction, sendMessageAction, refreshDiffAction, addExtensionAction, removeExtensionAction, configureAction, rotateCredentialsAction, updateApplicationAction, toggleAudit]);
   useAppKeymap(pageActions);
   useKeyboard((event) => {
-    if (form || detail || ![0, 5].includes(tab) || event.name.toLowerCase() !== 'v') return;
-    setRevealCredentials(event.eventType !== 'release');
+    setRevealCredentials((current) => nextCredentialVisibility(
+      current,
+      { name: event.name, eventType: event.eventType },
+      !form && !detail && [0, 5].includes(tab),
+    ));
   }, { release: true });
 
   const copySelection = useCallback(() => {
@@ -186,7 +197,7 @@ export function App({ controller, onExit }: { controller: TuiController; onExit:
   const scrollKey = `${tab}-${detail?.kind || 'page'}-${detail?.id || ''}`;
   return (
     <box width={width} height={height} flexDirection="column" backgroundColor={theme.background} onMouseUp={copySelection}>
-      <Header theme={theme} pending={pending} zh={zh} />
+      <Header runtime={runtime} theme={theme} pending={pending} zh={zh} />
       <TabBar active={tab} theme={theme} zh={zh} onSelect={switchTab} />
       <box height={1} flexShrink={0} backgroundColor={theme.background}><text fg={theme.border}>{'─'.repeat(Math.max(1, width))}</text></box>
       <scrollbox
@@ -203,7 +214,7 @@ export function App({ controller, onExit }: { controller: TuiController; onExit:
         {content}
       </scrollbox>
       <Footer tab={tab} detail={detail} theme={theme} zh={zh} notice={notice} />
-      {form ? <FormDialog questions={form.questions} preamble={form.preamble} theme={theme} width={width} height={height} zh={zh} onComplete={completeForm} onCancel={cancelForm} /> : null}
+      {form ? <FormDialog key={form.id} questions={form.questions} preamble={form.preamble} theme={theme} width={width} height={height} zh={zh} onComplete={completeForm} onCancel={cancelForm} /> : null}
     </box>
   );
 }

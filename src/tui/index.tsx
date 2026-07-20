@@ -4,14 +4,14 @@ import { KeymapProvider } from '@opentui/keymap/react';
 import { createRoot, type Root } from '@opentui/react';
 import { createElement } from 'react';
 import type { LiteRuntime } from '../server.js';
-import path from 'node:path';
-import { isWorkspaceRecordActive, type WorkspaceRecord } from '../instances.js';
+import type { WorkspaceRecord } from '../instances.js';
+import { selectedWorkspace } from '../workspace-selection.js';
 import type { LiteSettings } from '../types.js';
 import { App } from './App.js';
 import { Setup } from './Setup.js';
 import { themeFor, TuiController, type FormQuestion, type RuntimeReconfigure } from './state.js';
 import { FormDialog } from './components/FormDialog.js';
-import { workspaceChoiceQuestion } from './form-model.js';
+import { buildWorkspaceSelectorModel } from './workspace-selector.js';
 
 export type { RuntimeReconfigure, RuntimeReconfigureResult } from './state.js';
 
@@ -34,7 +34,7 @@ function renderWithKeymap(renderer: CliRenderer, node: ReturnType<typeof createE
   return root;
 }
 
-export async function runSetupTui(defaults: LiteSettings): Promise<LiteSettings> {
+export async function runSetupTui(defaults: LiteSettings, records: WorkspaceRecord[] = []): Promise<LiteSettings> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('First launch requires the TUI. Run `bun run dev` in an interactive terminal.');
   const renderer = await createRenderer();
   let root: Root | undefined;
@@ -42,6 +42,7 @@ export async function runSetupTui(defaults: LiteSettings): Promise<LiteSettings>
     return await new Promise<LiteSettings>((resolve, reject) => {
       root = renderWithKeymap(renderer, createElement(Setup, {
         defaults,
+        records,
         onComplete: resolve,
         onCancel: () => reject(new Error('Setup cancelled.')),
       }));
@@ -56,19 +57,12 @@ export async function runWorkspaceChooserTui(records: WorkspaceRecord[], current
   if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('Workspace selection requires an interactive terminal.');
   const renderer = await createRenderer();
   let root: Root | undefined;
-  const currentIndex = records.findIndex((item) => path.resolve(item.workspaceDir) === path.resolve(currentWorkspaceDir));
-  const question = workspaceChoiceQuestion(
-    zh ? '选择工作区' : 'Select workspace',
-    records.map((item) => ({
-      title: item.label || path.basename(item.workspaceDir) || item.id,
-      workspaceDir: item.workspaceDir,
-      status: isWorkspaceRecordActive(item)
-        ? `${zh ? '运行中' : 'active'} · ${item.lastHost || '127.0.0.1'}:${item.lastPort || '?'} · PID ${item.lastPid || '?'}`
-        : (zh ? '未运行' : 'inactive'),
-      active: isWorkspaceRecordActive(item),
-    })),
-    currentIndex,
-  );
+  const { items, question } = buildWorkspaceSelectorModel({
+    label: zh ? '选择工作区' : 'Select workspace',
+    records,
+    currentWorkspaceDir,
+    zh,
+  });
   try {
     return await new Promise<string | undefined>((resolve, reject) => {
       root = renderWithKeymap(renderer, createElement(FormDialog, {
@@ -79,8 +73,9 @@ export async function runWorkspaceChooserTui(records: WorkspaceRecord[], current
         height: renderer.height,
         zh,
         onComplete: (answers: string[]) => {
-          const selected = records[Number(answers[0]) - 1];
+          const selected = selectedWorkspace(items, answers[0]);
           if (!selected) reject(new Error('Invalid workspace selection.'));
+          else if (selected.disabled) reject(new Error(`Workspace is already active: ${selected.workspaceDir}`));
           else resolve(selected.workspaceDir);
         },
         onCancel: () => resolve(undefined),

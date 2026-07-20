@@ -1,19 +1,20 @@
 import path from 'node:path';
 import { useTerminalDimensions } from '@opentui/react';
 import { useState } from 'react';
-import { settingsPath, validateSettings, validateSettingsFeasibility } from '../config.js';
-import { describePortOwner, findAvailablePort, isWorkspaceRecordActive, readWorkspaceRegistry, resolveWorkspaceInput, terminatePortOwner } from '../instances.js';
+import { validateSettings, validateSettingsFeasibility } from '../config.js';
+import { describePortOwner, findAvailablePort, resolveWorkspaceInput, terminatePortOwner, type WorkspaceRecord } from '../instances.js';
+import { selectedWorkspace } from '../workspace-selection.js';
 import type { LiteSettings } from '../types.js';
 import { themeFor, type FormQuestion } from './state.js';
 import { FormDialog } from './components/FormDialog.js';
-import { workspaceChoiceQuestion } from './form-model.js';
+import { buildWorkspaceSelectorModel } from './workspace-selector.js';
 
 function integer(value: string, fallback: number): number {
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-export function Setup({ defaults, onComplete, onCancel }: { defaults: LiteSettings; onComplete: (settings: LiteSettings) => void; onCancel: () => void }) {
+export function Setup({ defaults, records, onComplete, onCancel }: { defaults: LiteSettings; records: WorkspaceRecord[]; onComplete: (settings: LiteSettings) => void; onCancel: () => void }) {
   const { width, height } = useTerminalDimensions();
   const [attempt, setAttempt] = useState(0);
   const [pendingConflict, setPendingConflict] = useState<{ candidate: LiteSettings; message: string }>();
@@ -22,24 +23,21 @@ export function Setup({ defaults, onComplete, onCancel }: { defaults: LiteSettin
     '所有配置都保存在 TUI 中，不需要手动编辑配置文件。',
   ]);
   const theme = themeFor(defaults.uiTheme);
-  const knownWorkspaces = readWorkspaceRegistry(path.dirname(settingsPath()));
-  const currentWorkspaceIndex = knownWorkspaces.findIndex((item) => path.resolve(item.workspaceDir) === path.resolve(defaults.workspaceDir));
+  const knownWorkspaces = records;
+  const workspaceSelector = buildWorkspaceSelectorModel({
+    label: '选择工作区 / Select workspace',
+    records: knownWorkspaces,
+    currentWorkspaceDir: defaults.workspaceDir,
+    zh: defaults.uiLanguage === 'zh-CN',
+  });
+  const workspaceItems = workspaceSelector.items;
   const questions: FormQuestion[] = pendingConflict ? [
     { label: `端口被非 LocalTerminal 程序占用 / Port occupied · ${describePortOwner(pendingConflict.candidate.port)}`, fallback: 'cancel', options: ['kill', 'next', 'cancel'] },
   ] : [
     { label: '界面语言 / UI language', fallback: defaults.uiLanguage, options: ['zh-CN', 'en'] },
     { label: '界面主题 / UI theme', fallback: defaults.uiTheme, options: ['dark', 'light'] },
     knownWorkspaces.length
-      ? workspaceChoiceQuestion(
-          '选择工作区 / Select workspace',
-          knownWorkspaces.map((item) => ({
-            title: item.label || path.basename(item.workspaceDir),
-            workspaceDir: item.workspaceDir,
-            status: isWorkspaceRecordActive(item) ? `active · ${item.lastHost || '127.0.0.1'}:${item.lastPort || '?'} · PID ${item.lastPid || '?'}` : 'inactive',
-            active: isWorkspaceRecordActive(item),
-          })),
-          currentWorkspaceIndex,
-        )
+      ? workspaceSelector.question
       : { label: '工作区路径 / Workspace path', fallback: defaults.workspaceDir, validate: (value) => { try { return path.resolve(value) ? undefined : 'Invalid workspace.'; } catch { return 'Invalid workspace.'; } } },
     { label: '监听地址 / Host', fallback: defaults.host },
     { label: '端口 / Port', fallback: String(defaults.port), validate: (value) => { const port = Number(value); return Number.isInteger(port) && port >= 0 && port <= 65535 ? undefined : 'Port must be 0-65535.'; } },
@@ -69,7 +67,7 @@ export function Setup({ defaults, onComplete, onCancel }: { defaults: LiteSettin
       ...defaults,
       uiLanguage: answers[0] as LiteSettings['uiLanguage'],
       uiTheme: answers[1] as LiteSettings['uiTheme'],
-      workspaceDir: resolveWorkspaceInput(answers[2], knownWorkspaces),
+      workspaceDir: selectedWorkspace(workspaceItems, answers[2])?.workspaceDir || resolveWorkspaceInput(answers[2], knownWorkspaces),
       host: answers[3],
       port: integer(answers[4], defaults.port),
       publicBaseUrl: answers[5].replace(/\/$/, ''),

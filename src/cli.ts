@@ -9,7 +9,8 @@ import {
 } from './config.js';
 import { LiteRuntime } from './server.js';
 import path from 'node:path';
-import { describePortOwner, findAvailablePort, isWorkspaceRecordActive, readWorkspaceRegistry, terminatePortOwner } from './instances.js';
+import { describePortOwner, findAvailablePort, isWorkspaceRecordActive, terminatePortOwner } from './instances.js';
+import { WorkspaceCatalog } from './workspace-catalog.js';
 import type { RuntimeReconfigure } from './tui/state.js';
 import type { LiteSettings } from './types.js';
 
@@ -53,7 +54,8 @@ async function ensureSettings(headless: boolean, env: NodeJS.ProcessEnv): Promis
   }
   const defaults = createDefaultSettings();
   const { runSetupTui } = await import('./tui/index.js');
-  const configured = await runSetupTui(defaults);
+  const catalog = new WorkspaceCatalog(path.dirname(settingsPath(env)));
+  const configured = await runSetupTui(defaults, catalog.snapshot());
   saveLiteSettings(configured, env);
 }
 
@@ -65,12 +67,10 @@ class StartupCancelled extends Error {
 async function chooseWorkspace(env: NodeJS.ProcessEnv): Promise<boolean> {
   const current = readLiteSettings(env);
   if (!current) return true;
-  const records = readWorkspaceRegistry(path.dirname(settingsPath(env)));
+  const records = new WorkspaceCatalog(path.dirname(settingsPath(env))).snapshot();
   if (!records.length) return true;
   const { runWorkspaceChooserTui } = await import('./tui/index.js');
-  const available = records.filter((record) => !isWorkspaceRecordActive(record));
-  if (!available.length) throw new Error('Every registered workspace is already active in another LocalTerminal Lite process.');
-  const selected = await runWorkspaceChooserTui(available, current.workspaceDir, current.uiLanguage === 'zh-CN');
+  const selected = await runWorkspaceChooserTui(records, current.workspaceDir, current.uiLanguage === 'zh-CN');
   if (!selected) return false;
   const active = records.find((record) => path.resolve(record.workspaceDir) === path.resolve(selected) && isWorkspaceRecordActive(record));
   if (active) throw new Error(`Workspace is already active in PID ${active.lastPid}: ${active.workspaceDir}`);
