@@ -50,13 +50,21 @@ jobs:
         run: bun build --compile --minify src/cli.ts --outfile release/${{ matrix.executable }}
         shell: bash
       - name: Smoke test executable
-        run: release/${{ matrix.executable }} --help
+        run: |
+          release/${{ matrix.executable }} --help
+          if [[ "${{ runner.os }}" != "macOS" ]]; then release/${{ matrix.executable }} --verify-installation; fi
         shell: bash
       - name: Package Unix asset
         if: runner.os != 'Windows'
         run: |
           chmod 755 release/${{ matrix.executable }}
-          tar -czf release/${{ matrix.asset }} -C release ${{ matrix.executable }}
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
+            cp scripts/mac-one-shot-awake-lock.swift release/mac-one-shot-awake-lock.swift
+            tar -czf release/${{ matrix.asset }} -C release ${{ matrix.executable }} mac-one-shot-awake-lock.swift
+            tar -tzf release/${{ matrix.asset }} | grep -Fxq mac-one-shot-awake-lock.swift
+          else
+            tar -czf release/${{ matrix.asset }} -C release ${{ matrix.executable }}
+          fi
           if command -v sha256sum >/dev/null 2>&1; then
             sha256sum release/${{ matrix.asset }} | sed 's#release/##' > release/${{ matrix.asset }}.sha256
           else
@@ -84,6 +92,51 @@ jobs:
           $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
           "$hash  ${{ matrix.asset }}" | Set-Content -Encoding Ascii "$archive.sha256"
         shell: powershell
+      - name: Exercise packaged installer on Unix
+        if: runner.os != 'Windows'
+        run: |
+          test_root="$RUNNER_TEMP/localterminal-real-install"
+          rm -rf "$test_root"
+          mkdir -p "$test_root/home" "$test_root/downloads"
+          cp "release/${{ matrix.asset }}" "$test_root/${{ matrix.asset }}"
+          cp "release/${{ matrix.asset }}.sha256" "$test_root/${{ matrix.asset }}.sha256"
+          head -c 4096 "$test_root/${{ matrix.asset }}" > "$test_root/downloads/${{ matrix.asset }}.part"
+          installer="scripts/install-linux.sh"
+          [[ "${{ runner.os }}" == "macOS" ]] && installer="scripts/install-macos.sh"
+          HOME="$test_root/home" SHELL=/bin/bash             LOCALTERMINAL_LITE_HOME="$test_root/app"             LOCALTERMINAL_LITE_BIN_DIR="$test_root/bin"             LOCALTERMINAL_LITE_DOWNLOAD_DIR="$test_root/downloads"             LOCALTERMINAL_LITE_ASSET_URL="file://$test_root/${{ matrix.asset }}"             LOCALTERMINAL_LITE_CHECKSUM_URL="file://$test_root/${{ matrix.asset }}.sha256"             LOCALTERMINAL_LITE_INSTALL_ONLY=1             bash "$installer"
+          "$test_root/bin/localterminal-lite" --verify-installation
+          mkdir -p "$test_root/incomplete/releases"
+          HOME="$test_root/home" SHELL=/bin/bash             LOCALTERMINAL_LITE_HOME="$test_root/incomplete"             LOCALTERMINAL_LITE_BIN_DIR="$test_root/bin2"             LOCALTERMINAL_LITE_DOWNLOAD_DIR="$test_root/downloads2"             LOCALTERMINAL_LITE_ASSET_URL="file://$test_root/${{ matrix.asset }}"             LOCALTERMINAL_LITE_CHECKSUM_URL="file://$test_root/${{ matrix.asset }}.sha256"             LOCALTERMINAL_LITE_INSTALL_ONLY=1             bash "$installer"
+          "$test_root/bin2/localterminal-lite" --verify-installation
+        shell: bash
+      - name: Exercise packaged installer on Windows
+        if: runner.os == 'Windows'
+        run: |
+          $tokens=$null; $errors=$null
+          [System.Management.Automation.Language.Parser]::ParseFile("scripts/install-windows.ps1",[ref]$tokens,[ref]$errors)>$null
+          if ($errors.Count) { $errors | ForEach-Object { Write-Error $_.Message }; exit 1 }
+          $testRoot = Join-Path $env:RUNNER_TEMP "localterminal-real-install"
+          Remove-Item $testRoot -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $testRoot,(Join-Path $testRoot "downloads") | Out-Null
+          Copy-Item "release/${{ matrix.asset }}" (Join-Path $testRoot "${{ matrix.asset }}")
+          Copy-Item "release/${{ matrix.asset }}.sha256" (Join-Path $testRoot "${{ matrix.asset }}.sha256")
+          $bytes = [IO.File]::ReadAllBytes((Join-Path $testRoot "${{ matrix.asset }}"))[0..4095]
+          [IO.File]::WriteAllBytes((Join-Path $testRoot "downloads\${{ matrix.asset }}.part"), $bytes)
+          $env:LOCALTERMINAL_LITE_HOME = Join-Path $testRoot "app"
+          $env:LOCALTERMINAL_LITE_BIN_DIR = Join-Path $testRoot "bin"
+          $env:LOCALTERMINAL_LITE_DOWNLOAD_DIR = Join-Path $testRoot "downloads"
+          $env:LOCALTERMINAL_LITE_ASSET_URL = ([Uri](Join-Path $testRoot "${{ matrix.asset }}")).AbsoluteUri
+          $env:LOCALTERMINAL_LITE_CHECKSUM_URL = ([Uri](Join-Path $testRoot "${{ matrix.asset }}.sha256")).AbsoluteUri
+          $env:LOCALTERMINAL_LITE_INSTALL_ONLY = "1"
+          & scripts/install-windows.ps1
+          & (Join-Path $env:LOCALTERMINAL_LITE_BIN_DIR "localterminal-lite.ps1") --verify-installation
+          $env:LOCALTERMINAL_LITE_HOME = Join-Path $testRoot "incomplete"
+          New-Item -ItemType Directory -Force -Path (Join-Path $env:LOCALTERMINAL_LITE_HOME "releases") | Out-Null
+          $env:LOCALTERMINAL_LITE_BIN_DIR = Join-Path $testRoot "bin2"
+          $env:LOCALTERMINAL_LITE_DOWNLOAD_DIR = Join-Path $testRoot "downloads2"
+          & scripts/install-windows.ps1
+          & (Join-Path $env:LOCALTERMINAL_LITE_BIN_DIR "localterminal-lite.ps1") --verify-installation
+        shell: pwsh
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.platform }}

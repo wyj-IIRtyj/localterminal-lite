@@ -1142,3 +1142,32 @@ test('project copy constraints forbid exposing implementation requirements as UI
   const constraints = fs.readFileSync(new URL('../AGENTS.md', import.meta.url), 'utf8');
   assert.match(constraints, /must not be shown as user-facing UI copy/);
 });
+
+test('credential reveal has a fail-closed deadline when terminals omit key release', () => {
+  const app = fs.readFileSync(new URL('../src/tui/App.tsx', import.meta.url), 'utf8');
+  assert.match(app, /credentialRevealDeadline/);
+  assert.match(app, /performance\.now\(\) \+ 350/);
+  assert.match(app, /setInterval\([\s\S]*setRevealCredentials\(false\)/);
+  assert.match(app, /event\.eventType === 'release'[\s\S]*credentialRevealDeadline\.current = 0/);
+});
+
+test('release installers resume partial downloads and repair incomplete layouts', () => {
+  for (const file of ['../scripts/install-macos.sh', '../scripts/install-linux.sh']) {
+    const source = fs.readFileSync(new URL(file, import.meta.url), 'utf8');
+    assert.match(source, /--continue-at|-C -/);
+    assert.match(source, /\.part/);
+    assert.match(source, /install_dir\/releases|\$install_dir\/releases/);
+  }
+  const windows = fs.readFileSync(new URL('../scripts/install-windows.ps1', import.meta.url), 'utf8');
+  assert.match(windows, /curl\.exe[\s\S]*--continue-at/);
+  assert.match(windows, /\$\{Version\}: \$InstallDir/);
+  assert.doesNotMatch(windows, /\$Version: \$InstallDir/);
+});
+
+test('macOS binary release packages and resolves the passive-lock helper source', () => {
+  const resources = fs.readFileSync(new URL('../src/session-resources.ts', import.meta.url), 'utf8');
+  const workflow = fs.readFileSync(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8');
+  assert.match(resources, /path\.dirname\(process\.execPath\)/);
+  assert.match(workflow, /mac-one-shot-awake-lock\.swift/);
+  assert.match(workflow, /--verify-installation/);
+});

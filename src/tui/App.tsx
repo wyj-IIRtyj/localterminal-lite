@@ -32,6 +32,7 @@ export function App({ controller, onExit }: { controller: TuiController; onExit:
   const [selected, setSelected] = useState<number[]>(Array(TABS.length).fill(0));
   const [detail, setDetail] = useState<Detail>();
   const [revealCredentials, setRevealCredentials] = useState(false);
+  const credentialRevealDeadline = useRef(0);
   const [showAudit, setShowAudit] = useState(false);
   const [form, setForm] = useState<FormState>();
   const [notice, setNotice] = useState<string>();
@@ -167,12 +168,23 @@ export function App({ controller, onExit }: { controller: TuiController; onExit:
     toggleAudit,
   }), [form, tab, detail, switchTab, nextTab, back, quit, moveSelection, open, createSessionAction, sessionAction, sendMessageAction, refreshDiffAction, addExtensionAction, removeExtensionAction, configureAction, rotateCredentialsAction, updateApplicationAction, toggleAudit]);
   useAppKeymap(pageActions);
+  useEffect(() => {
+    if (!revealCredentials) return;
+    const timer = setInterval(() => {
+      if (performance.now() >= credentialRevealDeadline.current) setRevealCredentials(false);
+    }, 50);
+    return () => clearInterval(timer);
+  }, [revealCredentials]);
+
   useKeyboard((event) => {
     if (fatalError && (event.name === 'q' || event.name === 'escape')) { void quit(); return; }
+    const eligible = !form && !detail && [0, 5].includes(tab);
+    if (event.eventType === 'release') credentialRevealDeadline.current = 0;
+    else if (eligible && event.name?.toLowerCase() === 'v') credentialRevealDeadline.current = performance.now() + 350;
     setRevealCredentials((current) => nextCredentialVisibility(
       current,
       { name: event.name, eventType: event.eventType },
-      !form && !detail && [0, 5].includes(tab),
+      eligible,
     ));
   }, { release: true });
 

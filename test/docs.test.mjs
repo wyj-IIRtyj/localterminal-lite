@@ -76,3 +76,12 @@ test('binary installers use versioned releases, checksums, atomic current pointe
   assert.match(windows, /localterminal-lite\.cmd/);
   assert.doesNotMatch(windows, /bun install|run src\\cli\.ts/);
 });
+
+test('release notes contain substantive Chinese release and verification guidance', () => {
+  const notes = fs.readFileSync(new URL('../RELEASE_NOTES.md', import.meta.url), 'utf8');
+  assert.match(notes, /## 中文说明/);
+  assert.match(notes, /下载支持中断后续传/);
+  assert.match(notes, /Parallels/);
+  const chinese = notes.match(/[\u3400-\u9fff]/g) || [];
+  assert.ok(chinese.length >= 200, `expected substantial Chinese content, got ${chinese.length} characters`);
+});

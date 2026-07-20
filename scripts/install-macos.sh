@@ -16,6 +16,7 @@ asset="localterminal-lite-${platform}.tar.gz"
 asset_url="${LOCALTERMINAL_LITE_ASSET_URL:-https://github.com/${repository}/releases/download/${version}/${asset}}"
 checksum_url="${LOCALTERMINAL_LITE_CHECKSUM_URL:-${asset_url}.sha256}"
 temporary_dir="$(mktemp -d)"
+download_dir="${LOCALTERMINAL_LITE_DOWNLOAD_DIR:-${TMPDIR:-/tmp}/localterminal-lite-downloads}"
 backup_dir=""
 migrating_legacy=0
 committed=0
@@ -46,7 +47,7 @@ if [[ -e "$install_dir" ]]; then
     echo "Use git pull for source checkouts, or set LOCALTERMINAL_LITE_HOME to a release installation directory." >&2
     exit 1
   fi
-  if ! is_binary_layout && ! is_legacy_layout; then
+  if ! is_binary_layout && ! is_legacy_layout && [[ ! -d "$install_dir/releases" ]]; then
     echo "The target exists but is not a recognized LocalTerminal Lite installation: $install_dir" >&2
     exit 1
   fi
@@ -57,13 +58,18 @@ if [[ -e "$install_dir" ]]; then
   fi
 fi
 
-mkdir -p "$temporary_dir" "$install_dir/releases" "$launcher_dir"
-curl -fL --retry 3 --retry-delay 1 "$asset_url" -o "$temporary_dir/$asset"
-curl -fL --retry 3 --retry-delay 1 "$checksum_url" -o "$temporary_dir/$asset.sha256"
+mkdir -p "$temporary_dir" "$download_dir" "$launcher_dir"
+asset_part="$download_dir/$asset.part"
+checksum_part="$download_dir/$asset.sha256.part"
+curl -fL --retry 5 --retry-all-errors --retry-delay 1 -C - "$asset_url" -o "$asset_part"
+curl -fL --retry 5 --retry-all-errors --retry-delay 1 "$checksum_url" -o "$checksum_part"
+cp "$asset_part" "$temporary_dir/$asset"
+cp "$checksum_part" "$temporary_dir/$asset.sha256"
 
 expected="$(awk '{print $1}' "$temporary_dir/$asset.sha256" | tr -d '\r\n')"
 actual="$(shasum -a 256 "$temporary_dir/$asset" | awk '{print $1}')"
 [[ -n "$expected" && "$expected" == "$actual" ]] || {
+  rm -f "$asset_part" "$checksum_part"
   echo "SHA-256 verification failed for $asset" >&2
   exit 1
 }
@@ -79,6 +85,10 @@ release_staging="$install_dir/releases/.${version}.staging.$$"
 rm -rf "$release_staging"
 mkdir -p "$release_staging"
 cp "$binary" "$release_staging/localterminal-lite"
+helper_source="$temporary_dir/mac-one-shot-awake-lock.swift"
+[[ -f "$helper_source" ]] || { echo "Release asset does not contain mac-one-shot-awake-lock.swift" >&2; exit 1; }
+cp "$helper_source" "$release_staging/mac-one-shot-awake-lock.swift"
+chmod 600 "$release_staging/mac-one-shot-awake-lock.swift"
 chmod 755 "$release_staging/localterminal-lite"
 rm -rf "$release_dir"
 mv "$release_staging" "$release_dir"
@@ -112,6 +122,7 @@ esac
 find "$install_dir/releases" -mindepth 1 -maxdepth 1 -type d -name 'v*' -print0 \
   | xargs -0 ls -1dt 2>/dev/null | tail -n +3 | while IFS= read -r old; do rm -rf "$old"; done || true
 
+rm -f "$asset_part" "$checksum_part"
 committed=1
 export PATH="$launcher_dir:$PATH"
 echo "Installed LocalTerminal Lite ${version}: $install_dir"

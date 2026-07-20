@@ -8,8 +8,9 @@ $Asset = "localterminal-lite-windows-x64.zip"
 $AssetUrl = if ($env:LOCALTERMINAL_LITE_ASSET_URL) { $env:LOCALTERMINAL_LITE_ASSET_URL } else { "https://github.com/$Repository/releases/download/$Version/$Asset" }
 $ChecksumUrl = if ($env:LOCALTERMINAL_LITE_CHECKSUM_URL) { $env:LOCALTERMINAL_LITE_CHECKSUM_URL } else { "$AssetUrl.sha256" }
 $TemporaryDir = Join-Path ([System.IO.Path]::GetTempPath()) ("localterminal-lite-" + [System.Guid]::NewGuid().ToString("N"))
-$Archive = Join-Path $TemporaryDir $Asset
-$ChecksumFile = "$Archive.sha256"
+$DownloadDir = if ($env:LOCALTERMINAL_LITE_DOWNLOAD_DIR) { $env:LOCALTERMINAL_LITE_DOWNLOAD_DIR } else { Join-Path ([System.IO.Path]::GetTempPath()) "localterminal-lite-downloads" }
+$Archive = Join-Path $DownloadDir "$Asset.part"
+$ChecksumFile = Join-Path $DownloadDir "$Asset.sha256.part"
 $BackupDir = $null
 $MigratingLegacy = $false
 $Committed = $false
@@ -31,7 +32,7 @@ try {
     if ((Test-Path (Join-Path $InstallDir ".git")) -and ($env:LOCALTERMINAL_LITE_ALLOW_SOURCE_UPDATE -ne "1")) {
       throw "Refusing to overwrite a Git source checkout: $InstallDir"
     }
-    if (-not (Test-BinaryLayout) -and -not (Test-LegacyLayout)) {
+    if (-not (Test-BinaryLayout) -and -not (Test-LegacyLayout) -and -not (Test-Path (Join-Path $InstallDir "releases"))) {
       throw "The target exists but is not a recognized LocalTerminal Lite installation: $InstallDir"
     }
     if (Test-LegacyLayout) {
@@ -42,17 +43,22 @@ try {
   }
 
   New-Item -ItemType Directory -Force -Path $TemporaryDir | Out-Null
+  New-Item -ItemType Directory -Force -Path $DownloadDir | Out-Null
   New-Item -ItemType Directory -Force -Path (Join-Path $InstallDir "releases") | Out-Null
   New-Item -ItemType Directory -Force -Path $LauncherDir | Out-Null
 
-  Invoke-WebRequest $AssetUrl -OutFile $Archive
-  Invoke-WebRequest $ChecksumUrl -OutFile $ChecksumFile
+  & curl.exe --fail --location --retry 5 --retry-all-errors --continue-at - --output $Archive $AssetUrl
+  if ($LASTEXITCODE -ne 0) { throw "Failed to download $Asset" }
+  & curl.exe --fail --location --retry 5 --retry-all-errors --output $ChecksumFile $ChecksumUrl
+  if ($LASTEXITCODE -ne 0) { throw "Failed to download checksum for $Asset" }
   $Expected = ((Get-Content -Raw $ChecksumFile).Trim() -split '\s+')[0].ToLowerInvariant()
   $Actual = (Get-FileHash -Algorithm SHA256 $Archive).Hash.ToLowerInvariant()
-  if (-not $Expected -or $Expected -ne $Actual) { throw "SHA-256 verification failed for $Asset" }
+  if (-not $Expected -or $Expected -ne $Actual) { Remove-Item $Archive,$ChecksumFile -Force -ErrorAction SilentlyContinue; throw "SHA-256 verification failed for $Asset" }
 
+  $VerifiedArchive = Join-Path $TemporaryDir $Asset
+  Copy-Item -LiteralPath $Archive -Destination $VerifiedArchive
   $Expanded = Join-Path $TemporaryDir "expanded"
-  Expand-Archive -Path $Archive -DestinationPath $Expanded
+  Expand-Archive -Path $VerifiedArchive -DestinationPath $Expanded
   $Binary = Join-Path $Expanded "localterminal-lite.exe"
   if (-not (Test-Path $Binary)) { throw "Release asset does not contain localterminal-lite.exe" }
 
@@ -95,7 +101,8 @@ try {
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
   $Committed = $true
-  Write-Host "Installed LocalTerminal Lite $Version: $InstallDir"
+  Remove-Item $Archive,$ChecksumFile -Force -ErrorAction SilentlyContinue
+  Write-Host "Installed LocalTerminal Lite ${Version}: $InstallDir"
   Write-Host "User settings and workspace state were preserved."
   Write-Host "Start it with: localterminal-lite"
   if ($env:LOCALTERMINAL_LITE_INSTALL_ONLY -ne "1") { & $PowerShellLauncher }

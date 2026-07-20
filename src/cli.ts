@@ -14,6 +14,7 @@ import { WorkspaceCatalog } from './workspace-catalog.js';
 import type { RuntimeReconfigure } from './tui/state.js';
 import type { LiteSettings } from './types.js';
 import { CURRENT_VERSION } from './version.js';
+import { verifyRuntimeResources } from './session-resources.js';
 
 function help(): void {
   console.log(`LocalTerminal Lite v${CURRENT_VERSION}
@@ -127,6 +128,10 @@ async function safeFatalShutdown(error: unknown): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  if (process.argv.includes('--verify-installation')) {
+    console.log(JSON.stringify(verifyRuntimeResources()));
+    return;
+  }
   if (process.argv.includes('--help') || process.argv.includes('-h')) {
     help();
     return;

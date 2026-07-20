@@ -41,9 +41,19 @@ function helperPath(config: LiteConfig): string {
 
 
 function sourcePath(): string {
+  const packaged = path.join(path.dirname(process.execPath), 'mac-one-shot-awake-lock.swift');
+  if (existsSync(packaged)) return packaged;
   return path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'mac-one-shot-awake-lock.swift');
 }
 
+
+
+export function verifyRuntimeResources(): { ok: true; platform: NodeJS.Platform; helperSource?: string } {
+  if (process.platform !== 'darwin') return { ok: true, platform: process.platform };
+  const helperSource = sourcePath();
+  if (!existsSync(helperSource)) throw new LiteError('NOT_FOUND', `macOS helper source is missing: ${helperSource}`);
+  return { ok: true, platform: process.platform, helperSource };
+}
 
 function processAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }

@@ -74,3 +74,22 @@ Installing an update does not replace code already loaded in running processes. 
 ## Verification
 
 Before tagging this release, the project requires type checking, production build, the complete automated test suite, dependency audit, standalone executable smoke tests, installer migration tests, and native validation on macOS, Windows, and Linux.
+
+
+## 中文说明
+
+LocalTerminal Lite v1.1.0 是首个采用预编译二进制分发的版本。macOS、Linux 和 Windows 安装器会下载对应平台的独立可执行文件并校验 SHA-256，不再要求用户预先安装 Git、Node.js 或 Bun。
+
+本版本重点包括：
+
+- 多工作区进程可共享同一个公开端口，并支持 leader/member 路由和自动故障转移。
+- 集群注册表可根据存活成员记录真实自愈；损坏状态会明确进入降级，而不会伪装成空集群。
+- Settings、首次启动和工作区选择器统一支持新增工作区。
+- 外置卷暂时卸载、系统休眠恢复和目录权限暂时不可用时，运行时进入重新验证或降级状态，不会覆盖凭据，也不会卡死整个 TUI。
+- 顶层渲染错误、异步错误和进程级异常均会记录日志并执行一次性安全关闭。
+- 凭据只会在按住 `V` 时短暂显示；松开按键、切换页面、打开表单或终端未提供可靠 key-up 事件时都会自动隐藏。
+- macOS 被动锁屏 helper 已随二进制发行包一起安装，不再依赖 `$bunfs` 中不可访问的源码路径。
+- 安装下载支持中断后续传；不完整安装目录可以在再次运行安装器时恢复。
+- 旧版源码安装、开发中间版本和已有二进制安装会在保留配置、工作区注册表、session、消息、历史、扩展、日志和凭据的前提下迁移。
+
+发布门禁要求五个平台在真实 runner 上完成类型检查、生产构建、完整测试、独立二进制构建、安装包解析、部分下载续传、不完整安装恢复、安装后资源诊断、版本输出和校验文件验证。macOS、Ubuntu ARM64 与 Windows 11 还需在本机 Parallels 虚拟机或宿主机上完成安装命令验证。
