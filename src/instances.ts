@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 
@@ -94,16 +94,54 @@ export function releaseWorkspaceRecord(configDir: string, id: string, pid: numbe
   }));
 }
 
-export function appendWorkspaceLog(stateDir: string, entry: unknown): void {
-  mkdirSync(stateDir, { recursive: true, mode: 0o700 });
-  appendFileSync(path.join(stateDir, 'runtime.jsonl'), `${JSON.stringify(entry)}\n`, { mode: 0o600 });
+const MAX_RUNTIME_LOG_BYTES = 5 * 1024 * 1024;
+const RUNTIME_LOG_ARCHIVES = 3;
+
+function rotateRuntimeLog(file: string): void {
+  if (!existsSync(file) || statSync(file).size < MAX_RUNTIME_LOG_BYTES) return;
+  for (let index = RUNTIME_LOG_ARCHIVES; index >= 1; index -= 1) {
+    const source = index === 1 ? file : `${file}.${index - 1}`;
+    const target = `${file}.${index}`;
+    if (!existsSync(source)) continue;
+    if (index === RUNTIME_LOG_ARCHIVES) { try { unlinkSync(target); } catch { /* absent archive */ } }
+    renameSync(source, target);
+  }
 }
 
-export function readWorkspaceLogs(configDir: string, limitPerWorkspace = 500): Array<{ workspace: WorkspaceRecord; entries: unknown[] }> {
+export function appendWorkspaceLog(stateDir: string, entry: unknown): void {
+  mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  const file = path.join(stateDir, 'runtime.jsonl');
+  rotateRuntimeLog(file);
+  appendFileSync(file, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
+}
+
+function readTailLines(file: string, limit: number, offset = 0): string[] {
+  if (!existsSync(file) || limit <= 0) return [];
+  const size = statSync(file).size;
+  if (!size) return [];
+  const fd = openSync(file, 'r');
+  try {
+    const chunkSize = 64 * 1024;
+    let position = size;
+    let text = '';
+    const wanted = Math.max(1, limit + offset + 1);
+    while (position > 0 && text.split('\n').length <= wanted) {
+      const length = Math.min(chunkSize, position);
+      position -= length;
+      const buffer = Buffer.allocUnsafe(length);
+      readSync(fd, buffer, 0, length, position);
+      text = buffer.toString('utf8') + text;
+    }
+    const lines = text.split('\n').filter(Boolean);
+    const end = Math.max(0, lines.length - offset);
+    return lines.slice(Math.max(0, end - limit), end);
+  } finally { closeSync(fd); }
+}
+
+export function readWorkspaceLogs(configDir: string, limitPerWorkspace = 500, offsetPerWorkspace = 0): Array<{ workspace: WorkspaceRecord; entries: unknown[] }> {
   return readWorkspaceRegistry(configDir).map((workspace) => {
     const file = path.join(workspace.stateDir, 'runtime.jsonl');
-    if (!existsSync(file)) return { workspace, entries: [] };
-    const lines = readFileSync(file, 'utf8').trim().split('\n').filter(Boolean).slice(-limitPerWorkspace);
+    const lines = readTailLines(file, limitPerWorkspace, offsetPerWorkspace);
     return { workspace, entries: lines.flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } }) };
   });
 }

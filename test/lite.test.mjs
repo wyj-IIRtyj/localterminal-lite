@@ -1180,3 +1180,33 @@ test('idle TUI refresh is revision-driven and never forces periodic deep snapsho
   assert.doesNotMatch(app, /tickReminders\(\);\s*refresh\(\)/);
   assert.doesNotMatch(app, /setInterval\([^)]*500\)/);
 });
+
+test('runtime logs rotate at bounded size and tail pages avoid loading the full file', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-log-rotation-'));
+  const configDir = path.join(root, 'config');
+  const workspaceDir = path.join(root, 'workspace');
+  const stateDir = path.join(configDir, 'workspaces', workspaceId(workspaceDir));
+  fs.mkdirSync(stateDir, { recursive: true });
+  upsertWorkspaceRecord(configDir, { id: workspaceId(workspaceDir), workspaceDir, stateDir, lastSeenAt: new Date().toISOString() });
+  const payload = 'x'.repeat(4096);
+  for (let index = 0; index < 1400; index += 1) appendWorkspaceLog(stateDir, { at: new Date(index).toISOString(), level: 'info', message: `${index}:${payload}` });
+  const files = fs.readdirSync(stateDir).filter((name) => name.startsWith('runtime.jsonl'));
+  assert.ok(files.length <= 4, `expected current log plus at most three archives, got ${files.length}`);
+  assert.ok(fs.statSync(path.join(stateDir, 'runtime.jsonl')).size < 5.1 * 1024 * 1024);
+  const firstPage = readWorkspaceLogs(configDir, 25, 0)[0].entries;
+  const secondPage = readWorkspaceLogs(configDir, 25, 25)[0].entries;
+  assert.equal(firstPage.length, 25);
+  assert.equal(secondPage.length, 25);
+  assert.notDeepEqual(firstPage, secondPage);
+  assert.match(firstPage.at(-1).message, /^1399:/);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('logs screen paginates rendering and exposes page navigation', () => {
+  const screen = fs.readFileSync(new URL('../src/tui/screens/Logs.tsx', import.meta.url), 'utf8');
+  const app = fs.readFileSync(new URL('../src/tui/App.tsx', import.meta.url), 'utf8');
+  assert.match(screen, /PAGE_SIZE = 100/);
+  assert.match(screen, /PgUp\/PgDn/);
+  assert.match(app, /event\.name === 'pagedown'/);
+  assert.match(app, /event\.name === 'pageup'/);
+});

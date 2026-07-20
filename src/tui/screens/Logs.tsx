@@ -44,8 +44,12 @@ function RuntimeRow({ entry, theme }: { entry: DisplayEntry; theme: Theme }) {
   );
 }
 
-export function Logs({ runtime, logs, theme, zh, showAudit }: { runtime: LiteRuntime; logs: RuntimeLog[]; theme: Theme; zh: boolean; showAudit: boolean }) {
-  const entries: DisplayEntry[] = logs.map((entry) => ({
+const PAGE_SIZE = 100;
+
+export function Logs({ runtime, logs, theme, zh, showAudit, page }: { runtime: LiteRuntime; logs: RuntimeLog[]; theme: Theme; zh: boolean; showAudit: boolean; page: number }) {
+  const localEnd = Math.max(0, logs.length - page * PAGE_SIZE);
+  const localStart = Math.max(0, localEnd - PAGE_SIZE);
+  const entries: DisplayEntry[] = logs.slice(localStart, localEnd).map((entry) => ({
     at: entry.at,
     kind: 'runtime',
     level: entry.level,
@@ -54,7 +58,7 @@ export function Logs({ runtime, logs, theme, zh, showAudit }: { runtime: LiteRun
   }));
   const currentWorkspaceId = workspaceId(runtime.config.workspaceDir);
   try {
-    for (const group of readWorkspaceLogs(path.dirname(runtime.config.settingsPath), 300)) {
+    for (const group of readWorkspaceLogs(path.dirname(runtime.config.settingsPath), PAGE_SIZE, page * PAGE_SIZE)) {
       if (group.workspace.id === currentWorkspaceId) continue;
       if (group.workspace.lastHost !== runtime.config.host || group.workspace.lastPort !== runtime.config.port) continue;
       const label = group.workspace.label || path.basename(group.workspace.workspaceDir) || group.workspace.id;
@@ -65,7 +69,7 @@ export function Logs({ runtime, logs, theme, zh, showAudit }: { runtime: LiteRun
       }
     }
   } catch { /* cross-workspace logs are best effort */ }
-  if (showAudit) for (const fact of runtime.store.auditFacts(2000)) entries.push({
+  if (showAudit) for (const fact of runtime.store.auditFacts(PAGE_SIZE * (page + 1)).slice(page * PAGE_SIZE)) entries.push({
     at: fact.at,
     kind: 'audit',
     level: fact.ok ? 'ok' : 'error',
@@ -75,18 +79,20 @@ export function Logs({ runtime, logs, theme, zh, showAudit }: { runtime: LiteRun
     duration: fact.durationMs,
   });
   entries.sort((a, b) => b.at.localeCompare(a.at));
+  const visibleEntries = entries.slice(0, PAGE_SIZE);
   return (
     <box flexDirection="column" width="100%" padding={1} gap={0}>
       <box flexDirection="row" gap={2} flexWrap="wrap" marginBottom={1}>
         <Heading theme={theme}>{zh ? '本机工作区日志' : 'Local workspace logs'}</Heading>
         <text fg={showAudit ? theme.good : theme.muted}>{showAudit ? (zh ? '调用审计：开启' : 'audit: ON') : (zh ? '调用审计：关闭' : 'audit: OFF')}</text>
+        <text fg={theme.muted}>{zh ? `第 ${page + 1} 页 · PgUp/PgDn 翻页` : `Page ${page + 1} · PgUp/PgDn`}</text>
       </box>
       <box flexDirection="row" gap={1} marginBottom={1}>
         <text fg={theme.muted}>{zh ? '时间' : 'TIME'}</text>
         <text fg={theme.muted}>{zh ? '状态' : 'STAT'}</text>
         <text fg={theme.muted}>{zh ? '操作 / 会话 / 内容' : 'OPERATION / SESSION / DETAIL'}</text>
       </box>
-      {entries.length ? entries.map((entry, index) => <RuntimeRow key={`${entry.at}-${entry.kind}-${index}`} entry={entry} theme={theme} />)
+      {visibleEntries.length ? visibleEntries.map((entry, index) => <RuntimeRow key={`${entry.at}-${entry.kind}-${index}`} entry={entry} theme={theme} />)
         : <text fg={theme.muted}>{zh ? '暂无日志。' : 'No log entries.'}</text>}
     </box>
   );
