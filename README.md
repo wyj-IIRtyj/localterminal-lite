@@ -4,7 +4,7 @@
 
 LocalTerminal Lite gives **ChatGPT's normal chat mode a controlled way to work on your local computer**. After you connect Lite through a custom GPT Action or a ChatGPT App, a regular ChatGPT conversation can inspect and edit the authorized local project, run bounded tools, coordinate multiple work sessions, and report progress while you retain control in a local TUI. Lite is the bridge between ChatGPT chat and your computer; it is not a replacement chat client.
 
-LocalTerminal Lite 1.1.0 provides that bridge through an auditable, inheritable work-session layer. It supports ChatGPT **Actions** and **Apps (MCP)**, multi-session collaboration, durable messages, declarative extensions, Git-style live diff tracking, and a full-window bilingual OpenTUI interface.
+LocalTerminal Lite 1.1.1 provides that bridge through an auditable, inheritable work-session layer. It supports ChatGPT **Actions** and **Apps (MCP)**, multi-session collaboration, durable messages, declarative extensions, Git-style live diff tracking, and a full-window bilingual OpenTUI interface.
 
 ![LocalTerminal Lite session hierarchy](docs/assets/tui/sessions-en.svg)
 
@@ -12,24 +12,24 @@ LocalTerminal Lite 1.1.0 provides that bridge through an auditable, inheritable 
 
 ### First installation
 
-You do not need Git, Node.js, Bun, or another programming environment beforehand. The installers download the standalone `v1.1.0` executable for the current operating system and CPU architecture, verify its SHA-256 checksum, register the global `localterminal-lite` command, and start the TUI. Release installations no longer download a source archive or runtime dependencies.
+You do not need Git, Node.js, Bun, or another programming environment beforehand. The installers download the standalone `v1.1.1` executable for the current operating system and CPU architecture, verify its SHA-256 checksum, register the global `localterminal-lite` command, and start the TUI. Release installations no longer download a source archive or runtime dependencies.
 
 #### macOS
 
 ```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.1.0/scripts/install-macos.sh)"
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.1.1/scripts/install-macos.sh)"
 ```
 
 #### Linux
 
 ```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.1.0/scripts/install-linux.sh)"
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.1.1/scripts/install-linux.sh)"
 ```
 
 #### Windows PowerShell
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.1.0/scripts/install-windows.ps1 | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.1.1/scripts/install-windows.ps1 | iex"
 ```
 
 Remote scripts are convenient but security-sensitive. You can inspect [install-macos.sh](scripts/install-macos.sh), [install-linux.sh](scripts/install-linux.sh), or [install-windows.ps1](scripts/install-windows.ps1) before running them.
@@ -38,7 +38,7 @@ The first-run TUI configures everything: language, theme, authorized workspace, 
 
 ### Start it again later
 
-Open a new Terminal, PowerShell, or Command Prompt window and use the global command installed for your user account. The launcher resolves the current executable through a versioned `releases/<version>` directory and an atomic `current` pointer. Users of the GitHub `v1.0.1` source-archive installation, an intermediate development installation, or an earlier binary release may run the `v1.1.0` installer directly for a lossless migration. Settings, credentials, workspaces, sessions, messages, and history are preserved.
+Open a new Terminal, PowerShell, or Command Prompt window and use the global command installed for your user account. The launcher resolves the current executable through a versioned `releases/<version>` directory and an atomic `current` pointer. Users of the GitHub `v1.0.1` source-archive installation, an intermediate development installation, or an earlier binary release may run the `v1.1.1` installer directly for a lossless migration. Settings, credentials, workspaces, sessions, messages, and history are preserved.
 
 ```text
 localterminal-lite
@@ -165,7 +165,7 @@ Licensed under the [Apache License 2.0](LICENSE), which permits personal and com
 LocalTerminal Lite is an independent open-source project and is not affiliated with or endorsed by OpenAI or Cloudflare. ChatGPT, OpenAI, and Cloudflare names are used only to describe interoperability.
 ## Updates
 
-LocalTerminal Lite checks the latest GitHub release when the TUI starts. The Settings tab shows the installed and latest versions; press `U` to install an available release. The updater downloads the precompiled executable and SHA-256 file for the current platform, installs it into a new version directory, and atomically switches the `current` pointer. The old version remains available for rollback. Git source checkouts are never overwritten by one-click update. See the [v1.1.0 release notes](RELEASE_NOTES.md) for migration and future-update details.
+LocalTerminal Lite checks the latest GitHub release when the TUI starts. The Settings tab shows the installed and latest versions; press `U` to install an available release. The updater downloads the precompiled executable and SHA-256 file for the current platform, installs it into a new version directory, and atomically switches the `current` pointer. The old version remains available for rollback. Git source checkouts are never overwritten by one-click update. See the [v1.1.1 release notes](RELEASE_NOTES.md) for migration and future-update details.
 
 Workspace state migration is additive and idempotent: existing target state, legacy global state, `state.migrated`, and the workspace `.localterminal-lite` directory are merged by stable IDs, while session history files are deduplicated and retained.
 ## Shared ports and workspace routing

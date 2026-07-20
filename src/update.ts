@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { CURRENT_VERSION } from './version.js';
 
@@ -60,6 +61,68 @@ export function installationRoot(): string {
   return path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 }
 
+
+function configRoot(): string {
+  return path.resolve(process.env.LITE_CONFIG_DIR || path.join(os.homedir(), '.config', 'localterminal-lite'));
+}
+
+export function snapshotUpdateData(root = configRoot()): { backupDir: string; files: string[] } {
+  mkdirSync(root, { recursive: true, mode: 0o700 });
+  const backupRoot = path.join(root, 'update-backups');
+  mkdirSync(backupRoot, { recursive: true, mode: 0o700 });
+  const backupDir = path.join(backupRoot, new Date().toISOString().replace(/[:.]/g, '-'));
+  mkdirSync(backupDir, { recursive: true, mode: 0o700 });
+  const files: string[] = [];
+  const walk = (dir: string) => {
+    for (const name of readdirSync(dir)) {
+      if (dir === root && name === 'update-backups') continue;
+      const source = path.join(dir, name);
+      const relative = path.relative(root, source);
+      const stat = statSync(source);
+      if (stat.isDirectory()) walk(source);
+      else if (stat.isFile()) {
+        files.push(relative);
+        const destination = path.join(backupDir, relative);
+        mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
+        cpSync(source, destination, { recursive: false });
+      }
+    }
+  };
+  walk(root);
+  return { backupDir, files };
+}
+
+export function restoreMissingUpdateData(snapshot: { backupDir: string; files: string[] }, root = configRoot()): void {
+  for (const relative of snapshot.files) {
+    const target = path.join(root, relative);
+    const backup = path.join(snapshot.backupDir, relative);
+    let restore = !existsSync(target);
+    if (!restore) {
+      const targetSize = statSync(target).size;
+      const backupSize = statSync(backup).size;
+      if (relative.endsWith('.json')) {
+        try {
+          const before = JSON.parse(readFileSync(backup, 'utf8')) as { revision?: number; sessions?: unknown[]; messages?: unknown[] };
+          const after = JSON.parse(readFileSync(target, 'utf8')) as { revision?: number; sessions?: unknown[]; messages?: unknown[] };
+          restore = Number(after.revision || 0) < Number(before.revision || 0)
+            || (after.sessions?.length || 0) < (before.sessions?.length || 0)
+            || (after.messages?.length || 0) < (before.messages?.length || 0);
+        } catch { restore = true; }
+      } else if (relative.endsWith('.jsonl')) restore = targetSize < backupSize;
+    }
+    if (!restore) continue;
+    mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+    cpSync(backup, target);
+  }
+}
+
+function pruneUpdateBackups(root = configRoot()): void {
+  const backupRoot = path.join(root, 'update-backups');
+  if (!existsSync(backupRoot)) return;
+  const dirs = readdirSync(backupRoot).map((name) => path.join(backupRoot, name)).filter((item) => statSync(item).isDirectory()).sort().reverse();
+  for (const old of dirs.slice(3)) rmSync(old, { recursive: true, force: true });
+}
+
 export function installedVersion(root = installationRoot()): string | undefined {
   try {
     const current = readFileSync(path.join(root, 'current'), 'utf8').trim();
@@ -72,6 +135,7 @@ export function isSourceCheckout(packageRoot = installationRoot()): boolean {
 }
 
 export async function installUpdate(tag: string): Promise<void> {
+  const snapshot = snapshotUpdateData();
   const normalized = tag.startsWith('v') ? tag : `v${tag}`;
   const rawBase = `https://raw.githubusercontent.com/${REPOSITORY}/${normalized}/scripts`;
   const script = process.platform === 'win32'
@@ -81,6 +145,7 @@ export async function installUpdate(tag: string): Promise<void> {
   const args = process.platform === 'win32'
     ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', `$env:LOCALTERMINAL_LITE_INSTALL_ONLY='1'; irm '${rawBase}/${script}' | iex`]
     : ['-lc', `export LOCALTERMINAL_LITE_INSTALL_ONLY=1; curl -fsSL '${rawBase}/${script}' | /bin/bash`];
+  try {
   await new Promise<void>((resolve, reject) => {
     const child = spawn(command, args, {
       stdio: 'inherit',
@@ -89,4 +154,10 @@ export async function installUpdate(tag: string): Promise<void> {
     child.once('error', reject);
     child.once('close', (code) => code === 0 ? resolve() : reject(new Error(`Updater exited with code ${code ?? 'unknown'}.`)));
   });
+  restoreMissingUpdateData(snapshot);
+  pruneUpdateBackups();
+  } catch (error) {
+    restoreMissingUpdateData(snapshot);
+    throw error;
+  }
 }

@@ -1,6 +1,6 @@
-# LocalTerminal Lite v1.1.0
+# LocalTerminal Lite v1.1.1
 
-LocalTerminal Lite v1.1.0 is the first binary-distributed release. It replaces source-archive installation with verified standalone executables for macOS, Linux, and Windows while preserving existing user configuration, workspace state, sessions, messages, history, and credentials.
+LocalTerminal Lite v1.1.1 is a data-integrity and Windows-launcher patch release. It also retains the standalone binary distribution introduced in v1.1.0. It replaces source-archive installation with verified standalone executables for macOS, Linux, and Windows while preserving existing user configuration, workspace state, sessions, messages, history, and credentials.
 
 ## Highlights
 
@@ -32,33 +32,33 @@ The installers download only the matching platform asset. Git, Node.js, Bun, dep
 ### macOS
 
 ```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.1.0/scripts/install-macos.sh)"
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.1.1/scripts/install-macos.sh)"
 ```
 
 ### Linux
 
 ```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.1.0/scripts/install-linux.sh)"
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.1.1/scripts/install-linux.sh)"
 ```
 
 ### Windows PowerShell
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.1.0/scripts/install-windows.ps1 | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.1.1/scripts/install-windows.ps1 | iex"
 ```
 
 The same commands cover:
 
 - the GitHub `v1.0.1` source-archive installation;
-- intermediate development installations created during the v1.1.0 development cycle;
+- intermediate development installations created during the v1.1.1 development cycle;
 - an existing versioned binary installation;
 - a clean first installation.
 
-The migration recognizes the old source layout, temporarily backs it up, installs the platform binary into `releases/v1.1.0`, atomically updates the `current` pointer, and removes the backup only after success. A failed migration restores the original installation. User configuration and workspace/session state live outside the program directory and are never deleted by the installer.
+The migration recognizes the old source layout, temporarily backs it up, installs the platform binary into `releases/v1.1.1`, atomically updates the `current` pointer, and removes the backup only after success. A failed migration restores the original installation. User configuration and workspace/session state live outside the program directory and are never deleted by the installer.
 
 Git source checkouts are intentionally not overwritten. Continue updating a checkout with Git, or install the release binary into another `LOCALTERMINAL_LITE_HOME`.
 
-## Updating after v1.1.0
+## Updating after v1.1.1
 
 LocalTerminal Lite checks GitHub Releases at startup. When Settings reports an available version, press `U` to run the matching platform installer. The updater downloads the new binary and checksum, installs it beside the old release, and atomically switches the `current` pointer. The active release and one rollback release are retained.
 
@@ -78,7 +78,7 @@ Before tagging this release, the project requires type checking, production buil
 
 ## 中文说明
 
-LocalTerminal Lite v1.1.0 是首个采用预编译二进制分发的版本。macOS、Linux 和 Windows 安装器会下载对应平台的独立可执行文件并校验 SHA-256，不再要求用户预先安装 Git、Node.js 或 Bun。
+LocalTerminal Lite v1.1.1 是首个采用预编译二进制分发的版本。macOS、Linux 和 Windows 安装器会下载对应平台的独立可执行文件并校验 SHA-256，不再要求用户预先安装 Git、Node.js 或 Bun。
 
 本版本重点包括：
 

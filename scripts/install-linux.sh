@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-version="${LOCALTERMINAL_LITE_VERSION:-v1.1.0}"
+version="${LOCALTERMINAL_LITE_VERSION:-v1.1.1}"
 repository="wyj-IIRtyj/localterminal-lite"
 install_dir="${LOCALTERMINAL_LITE_HOME:-$HOME/LocalTerminal-Lite}"
 launcher_dir="${LOCALTERMINAL_LITE_BIN_DIR:-$HOME/.local/bin}"
@@ -18,6 +18,8 @@ checksum_url="${LOCALTERMINAL_LITE_CHECKSUM_URL:-${asset_url}.sha256}"
 temporary_dir="$(mktemp -d)"
 download_dir="${LOCALTERMINAL_LITE_DOWNLOAD_DIR:-${TMPDIR:-/tmp}/localterminal-lite-downloads}"
 backup_dir=""
+config_dir="${LITE_CONFIG_DIR:-$HOME/.config/localterminal-lite}"
+legacy_backup_root="$config_dir/install-backups"
 migrating_legacy=0
 committed=0
 
@@ -27,7 +29,7 @@ cleanup() {
     rm -rf "$install_dir"
     [[ -n "$backup_dir" && -d "$backup_dir" ]] && mv "$backup_dir" "$install_dir" || true
   fi
-  [[ "$committed" == "1" && -n "$backup_dir" && -d "$backup_dir" ]] && rm -rf "$backup_dir"
+  : # successful legacy backups remain under the config directory for recovery
   rm -rf "$temporary_dir"
 }
 trap cleanup EXIT
@@ -49,7 +51,8 @@ if [[ -e "$install_dir" ]]; then
   fi
   if is_legacy_layout; then
     migrating_legacy=1
-    backup_dir="${install_dir}.backup.$(date +%s)"
+    mkdir -p "$legacy_backup_root"
+    backup_dir="$legacy_backup_root/legacy-$(date +%s)"
     mv "$install_dir" "$backup_dir"
   fi
 fi
@@ -112,6 +115,7 @@ find "$install_dir/releases" -mindepth 1 -maxdepth 1 -type d -name 'v*' -print0 
   | xargs -0 ls -1dt 2>/dev/null | tail -n +3 | while IFS= read -r old; do rm -rf "$old"; done || true
 
 rm -f "$asset_part" "$checksum_part"
+find "$legacy_backup_root" -mindepth 1 -maxdepth 1 -type d -name 'legacy-*' -print0 2>/dev/null   | xargs -0 ls -1dt 2>/dev/null | tail -n +4 | while IFS= read -r old; do rm -rf "$old"; done || true
 committed=1
 export PATH="$launcher_dir:$PATH"
 echo "Installed LocalTerminal Lite ${version}: $install_dir"

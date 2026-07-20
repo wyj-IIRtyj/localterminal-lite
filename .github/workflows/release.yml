@@ -129,13 +129,13 @@ jobs:
           $env:LOCALTERMINAL_LITE_CHECKSUM_URL = ([Uri](Join-Path $testRoot "${{ matrix.asset }}.sha256")).AbsoluteUri
           $env:LOCALTERMINAL_LITE_INSTALL_ONLY = "1"
           & scripts/install-windows.ps1
-          & (Join-Path $env:LOCALTERMINAL_LITE_BIN_DIR "localterminal-lite.ps1") --verify-installation
+          & (Join-Path $env:LOCALTERMINAL_LITE_BIN_DIR "localterminal-lite.cmd") --verify-installation
           $env:LOCALTERMINAL_LITE_HOME = Join-Path $testRoot "incomplete"
           New-Item -ItemType Directory -Force -Path (Join-Path $env:LOCALTERMINAL_LITE_HOME "releases") | Out-Null
           $env:LOCALTERMINAL_LITE_BIN_DIR = Join-Path $testRoot "bin2"
           $env:LOCALTERMINAL_LITE_DOWNLOAD_DIR = Join-Path $testRoot "downloads2"
           & scripts/install-windows.ps1
-          & (Join-Path $env:LOCALTERMINAL_LITE_BIN_DIR "localterminal-lite.ps1") --verify-installation
+          & (Join-Path $env:LOCALTERMINAL_LITE_BIN_DIR "localterminal-lite.cmd") --verify-installation
         shell: pwsh
       - uses: actions/upload-artifact@v4
         with:

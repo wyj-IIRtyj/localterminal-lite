@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
 import http from 'node:http';
 import { describePortOwner, portOwner, upsertWorkspaceRecord, workspaceId, workspaceStateDir } from './instances.js';
@@ -216,6 +216,16 @@ export function settingsWithEnvironment(settings: LiteSettings, env: NodeJS.Proc
   };
 }
 
+
+function archivedLegacyStateDirs(configDir: string): string[] {
+  const root = path.join(configDir, 'install-backups');
+  if (!existsSync(root)) return [];
+  return readdirSync(root, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => path.join(root, entry.name, '.localterminal-lite'))
+    .filter((candidate) => existsSync(candidate));
+}
+
 export function loadLiteConfig(env: NodeJS.ProcessEnv = process.env): LiteConfig {
   const stored = readLiteSettings(env);
   const base = stored || createDefaultSettings(path.resolve(envWorkspace(env) || defaultWorkspaceForCwd()));
@@ -230,7 +240,7 @@ export function loadLiteConfig(env: NodeJS.ProcessEnv = process.env): LiteConfig
   const legacyGlobalStateDir = path.join(configDir, 'state');
   const migratedGlobalStateDir = path.join(configDir, 'state.migrated');
   const legacyStateDir = path.join(workspaceDir, '.localterminal-lite');
-  migrateWorkspaceState(stateDir, [legacyGlobalStateDir, migratedGlobalStateDir, legacyStateDir]);
+  migrateWorkspaceState(stateDir, [legacyGlobalStateDir, migratedGlobalStateDir, legacyStateDir, ...archivedLegacyStateDirs(configDir)]);
   mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   upsertWorkspaceRecord(configDir, { id: workspaceId(workspaceDir), workspaceDir, stateDir, lastHost: settings.host, lastPort: settings.port, lastSeenAt: new Date().toISOString() });
   const publicBaseUrl = settings.publicBaseUrl || `http://${settings.host}:${settings.port}`;

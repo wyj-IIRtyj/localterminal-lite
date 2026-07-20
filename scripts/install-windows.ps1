@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Stop"
 
-$Version = if ($env:LOCALTERMINAL_LITE_VERSION) { $env:LOCALTERMINAL_LITE_VERSION } else { "v1.1.0" }
+$Version = if ($env:LOCALTERMINAL_LITE_VERSION) { $env:LOCALTERMINAL_LITE_VERSION } else { "v1.1.1" }
 $Repository = "wyj-IIRtyj/localterminal-lite"
 $InstallDir = if ($env:LOCALTERMINAL_LITE_HOME) { $env:LOCALTERMINAL_LITE_HOME } else { Join-Path $HOME "LocalTerminal-Lite" }
 $LauncherDir = if ($env:LOCALTERMINAL_LITE_BIN_DIR) { $env:LOCALTERMINAL_LITE_BIN_DIR } else { Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "LocalTerminal-Lite\bin" }
@@ -11,6 +11,8 @@ $TemporaryDir = Join-Path ([System.IO.Path]::GetTempPath()) ("localterminal-lite
 $DownloadDir = if ($env:LOCALTERMINAL_LITE_DOWNLOAD_DIR) { $env:LOCALTERMINAL_LITE_DOWNLOAD_DIR } else { Join-Path ([System.IO.Path]::GetTempPath()) "localterminal-lite-downloads" }
 $Archive = Join-Path $DownloadDir "$Asset.part"
 $ChecksumFile = Join-Path $DownloadDir "$Asset.sha256.part"
+$ConfigDir = if ($env:LITE_CONFIG_DIR) { $env:LITE_CONFIG_DIR } else { Join-Path $HOME ".config\localterminal-lite" }
+$LegacyBackupRoot = Join-Path $ConfigDir "install-backups"
 $BackupDir = $null
 $MigratingLegacy = $false
 $Committed = $false
@@ -37,7 +39,8 @@ try {
     }
     if (Test-LegacyLayout) {
       $MigratingLegacy = $true
-      $BackupDir = "$InstallDir.backup.$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
+      $null = New-Item -ItemType Directory -Force -Path $LegacyBackupRoot
+      $BackupDir = Join-Path $LegacyBackupRoot ("legacy-" + [DateTimeOffset]::UtcNow.ToUnixTimeSeconds())
       Move-Item -LiteralPath $InstallDir -Destination $BackupDir
     }
   }
@@ -76,17 +79,17 @@ try {
   Move-Item -LiteralPath $CurrentTmp -Destination $CurrentPath -Force
 
   $PowerShellLauncher = Join-Path $LauncherDir "localterminal-lite.ps1"
+  Remove-Item -LiteralPath $PowerShellLauncher -Force -ErrorAction SilentlyContinue
   $CommandLauncher = Join-Path $LauncherDir "localterminal-lite.cmd"
-  $EscapedInstallDir = $InstallDir.Replace("'", "''")
+  $EscapedInstallDir = $InstallDir.Replace("%", "%%")
   @(
-    '$ErrorActionPreference = "Stop"',
-    "`$Root = '$EscapedInstallDir'",
-    '$Version = (Get-Content -Raw (Join-Path $Root "current")).Trim()',
-    '$Binary = Join-Path (Join-Path (Join-Path $Root "releases") $Version) "localterminal-lite.exe"',
-    '& $Binary @args',
-    'exit $LASTEXITCODE'
-  ) | Set-Content -Path $PowerShellLauncher -Encoding UTF8
-  @('@echo off', 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0localterminal-lite.ps1" %*') | Set-Content -Path $CommandLauncher -Encoding Ascii
+    '@echo off',
+    'setlocal',
+    "set "ROOT=$EscapedInstallDir"",
+    'set /p VERSION=<"%ROOT%\current"',
+    '"%ROOT%\releases\%VERSION%\localterminal-lite.exe" %*',
+    'exit /b %ERRORLEVEL%'
+  ) | Set-Content -Path $CommandLauncher -Encoding Ascii
 
   $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
   $Entries = @($UserPath -split ';' | Where-Object { $_ })
@@ -99,13 +102,19 @@ try {
     Sort-Object LastWriteTime -Descending |
     Select-Object -Skip 2 |
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+  if (Test-Path $LegacyBackupRoot) {
+    Get-ChildItem -Path $LegacyBackupRoot -Directory -Filter "legacy-*" |
+      Sort-Object LastWriteTime -Descending |
+      Select-Object -Skip 3 |
+      Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+  }
 
   $Committed = $true
   Remove-Item $Archive,$ChecksumFile -Force -ErrorAction SilentlyContinue
   Write-Host "Installed LocalTerminal Lite ${Version}: $InstallDir"
   Write-Host "User settings and workspace state were preserved."
   Write-Host "Start it with: localterminal-lite"
-  if ($env:LOCALTERMINAL_LITE_INSTALL_ONLY -ne "1") { & $PowerShellLauncher }
+  if ($env:LOCALTERMINAL_LITE_INSTALL_ONLY -ne "1") { & $CommandLauncher }
 } catch {
   if (-not $Committed -and $MigratingLegacy) {
     Remove-Item -LiteralPath $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -113,6 +122,6 @@ try {
   }
   throw
 } finally {
-  if ($Committed -and $BackupDir -and (Test-Path $BackupDir)) { Remove-Item -LiteralPath $BackupDir -Recurse -Force -ErrorAction SilentlyContinue }
+  # Successful legacy backups remain under the config directory for recovery.
   Remove-Item -LiteralPath $TemporaryDir -Recurse -Force -ErrorAction SilentlyContinue
 }

@@ -1210,3 +1210,36 @@ test('logs screen paginates rendering and exposes page navigation', () => {
   assert.match(app, /event\.name === 'pagedown'/);
   assert.match(app, /event\.name === 'pageup'/);
 });
+
+test('update transaction snapshots configuration and restores regressed state and logs', async () => {
+  const { snapshotUpdateData, restoreMissingUpdateData } = await import('../dist/update.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-update-data-'));
+  const stateDir = path.join(root, 'workspaces', 'abc');
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.writeFileSync(path.join(root, 'config.json'), JSON.stringify({ schemaVersion: 1, connectorKey: CONNECTOR_KEY, actionsToken: ACTIONS_TOKEN }));
+  fs.writeFileSync(path.join(stateDir, 'state.json'), JSON.stringify({ schemaVersion: 2, revision: 9, sessions: [{ id: 's' }], messages: [{ id: 'm' }] }));
+  fs.writeFileSync(path.join(stateDir, 'runtime.jsonl'), '{"message":"before"}\n');
+  const snapshot = snapshotUpdateData(root);
+  fs.writeFileSync(path.join(stateDir, 'state.json'), JSON.stringify({ schemaVersion: 2, revision: 1, sessions: [], messages: [] }));
+  fs.writeFileSync(path.join(stateDir, 'runtime.jsonl'), '');
+  restoreMissingUpdateData(snapshot, root);
+  const restored = JSON.parse(fs.readFileSync(path.join(stateDir, 'state.json'), 'utf8'));
+  assert.equal(restored.revision, 9);
+  assert.equal(restored.sessions.length, 1);
+  assert.match(fs.readFileSync(path.join(stateDir, 'runtime.jsonl'), 'utf8'), /before/);
+  assert.match(fs.readFileSync(path.join(root, 'config.json'), 'utf8'), new RegExp(CONNECTOR_KEY));
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('installers keep legacy backups under config and Windows launcher avoids PowerShell policy', () => {
+  for (const file of ['../scripts/install-macos.sh', '../scripts/install-linux.sh']) {
+    const source = fs.readFileSync(new URL(file, import.meta.url), 'utf8');
+    assert.match(source, /install-backups/);
+    assert.doesNotMatch(source, /\$\{install_dir\}\.backup/);
+  }
+  const windows = fs.readFileSync(new URL('../scripts/install-windows.ps1', import.meta.url), 'utf8');
+  assert.match(windows, /localterminal-lite\.cmd/);
+  assert.match(windows, /set \/p VERSION/);
+  assert.match(windows, /Remove-Item[^\n]*localterminal-lite\.ps1|\$PowerShellLauncher/);
+  assert.doesNotMatch(windows, /powershell\.exe -NoProfile -ExecutionPolicy Bypass -File/);
+});
