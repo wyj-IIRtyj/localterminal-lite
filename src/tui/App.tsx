@@ -58,7 +58,15 @@ export function App({ controller, onExit }: { controller: TuiController; onExit:
   useEffect(() => () => { if (noticeTimer.current) clearTimeout(noticeTimer.current); }, []);
 
   useEffect(() => {
-    const timer = setInterval(() => { controller.tickReminders(); refresh(); }, 500);
+    let renderedRevision = controller.renderRevision();
+    const timer = setInterval(() => {
+      controller.tickReminders();
+      const nextRevision = controller.renderRevision();
+      if (nextRevision !== renderedRevision) {
+        renderedRevision = nextRevision;
+        refresh();
+      }
+    }, 1000);
     return () => clearInterval(timer);
   }, [controller, refresh]);
 

@@ -127,6 +127,17 @@ export class TuiController {
     return { state: this.currentRuntime.store.snapshot(), diff: this.diff.snapshot(), logs: [...this.currentRuntime.logs], runtime: this.currentRuntime, update: { ...this.update } };
   }
 
+  renderRevision(): string {
+    const diff = this.diff.snapshot();
+    return [
+      this.currentRuntime.store.revision(),
+      this.currentRuntime.logs.length,
+      diff.loading, diff.updatedAt || '', diff.lines.length, diff.error || '', diff.unavailableReason || '',
+      this.update.checking, this.update.latestVersion || '', this.update.error || '',
+      this.currentRuntime.runtimeHealth().phase,
+    ].join(':');
+  }
+
   async refreshDiff(): Promise<void> { await this.diff.refresh(); }
 
   async refreshUpdateStatus(): Promise<void> {

@@ -85,6 +85,7 @@ export class LiteStore {
   }
 
   snapshot(): StoredState { return structuredClone(this.state); }
+  revision(): number { return this.state.revision; }
   listSessions(): LiteSession[] { this.refreshTemporalStates(); return structuredClone(this.state.sessions); }
   session(id: string): LiteSession {
     const found = this.findSession(id);

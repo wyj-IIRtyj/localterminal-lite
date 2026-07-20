@@ -1171,3 +1171,12 @@ test('macOS binary release packages and resolves the passive-lock helper source'
   assert.match(workflow, /mac-one-shot-awake-lock\.swift/);
   assert.match(workflow, /--verify-installation/);
 });
+
+test('idle TUI refresh is revision-driven and never forces periodic deep snapshot renders', () => {
+  const app = fs.readFileSync(new URL('../src/tui/App.tsx', import.meta.url), 'utf8');
+  const controller = fs.readFileSync(new URL('../src/tui/state.ts', import.meta.url), 'utf8');
+  assert.match(controller, /renderRevision\(\)/);
+  assert.match(app, /nextRevision !== renderedRevision/);
+  assert.doesNotMatch(app, /tickReminders\(\);\s*refresh\(\)/);
+  assert.doesNotMatch(app, /setInterval\([^)]*500\)/);
+});
