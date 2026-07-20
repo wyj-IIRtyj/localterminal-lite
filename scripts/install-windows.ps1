@@ -85,7 +85,7 @@ try {
   @(
     '@echo off',
     'setlocal',
-    "set "ROOT=$EscapedInstallDir"",
+    ('set "ROOT={0}"' -f $EscapedInstallDir),
     'set /p VERSION=<"%ROOT%\current"',
     '"%ROOT%\releases\%VERSION%\localterminal-lite.exe" %*',
     'exit /b %ERRORLEVEL%'
