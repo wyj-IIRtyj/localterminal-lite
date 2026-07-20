@@ -140,7 +140,10 @@ export async function validateSettingsFeasibility(settings: LiteSettings, curren
             resolve(`Port ${settings.port} is already in use on ${settings.host} (${describePortOwner(settings.port)}).`);
           });
         });
-        request.once('timeout', () => request.destroy());
+        request.setTimeout(1000, () => {
+          request.destroy();
+          resolve(`Port ${settings.port} is already in use on ${settings.host} (${describePortOwner(settings.port)}).`);
+        });
         request.once('error', () => resolve(`Port ${settings.port} is already in use on ${settings.host} (${describePortOwner(settings.port)}).`));
         return;
       }

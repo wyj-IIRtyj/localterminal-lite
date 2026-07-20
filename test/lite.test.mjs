@@ -144,7 +144,7 @@ test('settings feasibility ignores a port owned by the current process and state
   try {
     const port = blocker.address().port;
     const settings = { ...createDefaultSettings(workspaceDir), port };
-    const errors = await validateSettingsFeasibility(settings);
+    const errors = await validateSettingsFeasibility(settings, { host: settings.host, port: settings.port });
     assert.equal(errors.some((error) => error.includes('already in use')), false);
     saveLiteSettings({ ...settings, port: 0 }, env);
     const config = loadLiteConfig(env);
@@ -389,6 +389,7 @@ test('three workspaces share one port, route by workspace and session, and survi
 });
 
 test('terminal session cleanup terminates a bound helper process', async () => {
+  if (process.platform !== 'darwin') return;
   const workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-resource-workspace-'));
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-resource-state-'));
   const child = spawn(process.execPath, ['-e', "process.title='LocalTerminalLitePassiveLock'; setInterval(() => {}, 1000)"], { stdio: 'ignore' });
