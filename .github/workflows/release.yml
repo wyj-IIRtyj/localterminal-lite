@@ -105,7 +105,7 @@ jobs:
           }
           if ($lastError) { throw $lastError }
           $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
-          "$hash  ${{ matrix.asset }}" | Set-Content -Encoding Ascii "$archive.sha256"
+          [IO.File]::WriteAllText("$archive.sha256", "$hash  ${{ matrix.asset }}`n", [Text.UTF8Encoding]::new($false))
         shell: powershell
       - name: Exercise packaged installer on Unix
         if: runner.os != 'Windows'
