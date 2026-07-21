@@ -68,6 +68,15 @@ function tool(name, invoke, properties = {}) {
   };
 }
 
+async function waitFor(predicate, timeoutMs = 2_000, intervalMs = 5) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (predicate()) return;
+    if (Date.now() >= deadline) throw new Error(`Condition was not met within ${timeoutMs}ms.`);
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
+
 test('Actions OpenAPI explicitly exposes workspaceId for root bootstrap', () => {
   const root = tempRoot('lite-openapi-workspace-');
   try {
@@ -114,7 +123,7 @@ test('healthy control polling emits one connected state across repeated probes',
     onState: (state) => states.push(state),
   });
   monitor.start();
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await waitFor(() => calls >= 3);
   monitor.stop();
   assert.ok(calls >= 3);
   assert.equal(states.filter((state) => state.phase === 'connected').length, 1);
@@ -161,7 +170,7 @@ test('shared port has one control monitor and public Actions schema completes di
   try {
     await runtimeA.start();
     await runtimeB.start();
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    await waitFor(() => [runtimeA.controlChannelStatus(), runtimeB.controlChannelStatus()].filter(Boolean).length === 1);
     assert.equal([runtimeA.controlChannelStatus(), runtimeB.controlChannelStatus()].filter(Boolean).length, 1);
 
     const base = `http://127.0.0.1:${port}`;
@@ -224,7 +233,7 @@ test('action lifecycle audit records start, success, failure, timeout, workspace
     assert.equal(secretFailure.ok, false);
 
     const pendingCall = service.call({ tool: 'hang_action', input: {}, identity }, { transport: 'actions' });
-    await new Promise((resolve) => setTimeout(resolve, 5));
+    await waitFor(() => service.activeActionCount() === 1);
     assert.equal(service.activeActionCount(), 1);
     assert.equal(service.pendingActions().length, 1);
     assert.equal(service.expirePendingActions(0, 'resume cleanup'), 1);
@@ -288,7 +297,7 @@ test('control channel classifies Cloudflare/backend failures and reconnects with
     onRecovered: () => { recovered += 1; },
   });
   monitor.start();
-  await new Promise((resolve) => setTimeout(resolve, 30));
+  await waitFor(() => calls >= 2 && monitor.snapshot().phase === 'connected');
   const snapshot = monitor.snapshot();
   monitor.stop();
   assert.ok(calls >= 2);
@@ -320,7 +329,7 @@ test('one workspace control-channel outage does not alter another workspace moni
   });
   monitorA.start();
   monitorB.start();
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await waitFor(() => monitorA.snapshot().phase === 'disconnected' && monitorB.snapshot().phase === 'connected');
   const snapshotA = monitorA.snapshot();
   const snapshotB = monitorB.snapshot();
   monitorA.stop();
