@@ -21,19 +21,19 @@ Highest fan-in modules during the review:
 
 | Module | Importers | Interpretation |
 |---|---:|---|
-| `types.ts` | 25 | Expected shared domain schema; keep dependency-free |
-| `tui/state.ts` | 21 | Excessive presentation/orchestration coupling |
-| `instances.ts` | 9 | Catalog and process-lease service |
-| `server.ts` | 9 | Runtime facade used by UI and tests |
+| `types.ts` | 26 | Expected shared domain schema; keep dependency-free |
+| `tui/state.ts` | 19 | Excessive presentation/orchestration coupling |
+| `server.ts` | 11 | Runtime facade used by UI and tests |
+| `instances.ts` | 10 | Catalog and process-lease service |
 | `tui/screens/shared.tsx` | 7 | Expected shared rendering primitives |
 
 Highest fan-out modules:
 
 | Module | Direct internal dependencies | Risk |
 |---|---:|---|
-| `tui/App.tsx` | 15 | Composition root; acceptable, but no domain logic should be added |
-| `server.ts` | 12 | Runtime composition plus lifecycle; approaching extraction threshold |
-| `tui/state.ts` | 11 | God-controller risk |
+| `tui/App.tsx` | 16 | Composition root; acceptable, but no domain logic should be added |
+| `server.ts` | 16 | Runtime composition plus lifecycle; beyond extraction threshold |
+| `tui/state.ts` | 13 | God-controller risk |
 | `tui/index.tsx` | 10 | Renderer/bootstrap composition |
 | `tui/Setup.tsx` | 7 | Setup currently knows configuration and selector details |
 
@@ -77,7 +77,7 @@ Mitigation implemented:
 
 ### `store.ts` is oversized
 
-At roughly 700 lines it owns session lifecycle, controller credentials, app bindings, messages, events, subscriptions, checkpoints, temporal transitions, persistence, history, and audit redaction.
+At roughly 850 lines it owns session lifecycle, controller credentials, app bindings, messages, events, subscriptions, checkpoints, temporal transitions, journal/snapshot persistence, history, and audit redaction.
 
 Recommended extraction sequence:
 
@@ -136,7 +136,7 @@ Migrate atomically and preserve backward reading for one release cycle.
 3. Every persisted transient field needs publish, refresh, release, stale-reap, and migration semantics.
 4. Subprocesses require deadlines, bounded output, and deterministic termination.
 5. File inspection requires stat-before-read, bounded reads, realpath containment, and binary handling.
-6. Security UI state must fail closed on unknown, release, blur/navigation, and component teardown.
+6. Security UI state must fail closed on a bounded repeat deadline, blur/navigation, ineligible context, and component teardown; unreliable release packets must not cause flicker.
 7. Composition roots may have high fan-out but must not contain domain decisions.
 8. Contract/type modules must not import orchestration modules.
 

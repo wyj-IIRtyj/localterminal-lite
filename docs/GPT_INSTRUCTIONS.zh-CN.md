@@ -2,7 +2,7 @@
 
 [English](GPT_INSTRUCTIONS.md) · [Actions 配置教程](ACTIONS_SETUP.zh-CN.md) · [短提示词手册](PROMPT_PLAYBOOK.zh-CN.md)
 
-把下面整段粘贴到 GPT 编辑器的 **指令（Instructions）** 字段。它明确了三个 Actions 操作的语义以及 Lite session 生命周期。
+把下面整段粘贴到 GPT 编辑器的 **指令（Instructions）** 字段。它已按 LocalTerminal Lite 1.1.1 验证，明确了三个 Actions 操作、审计生命周期以及 Lite session 生命周期。
 
 ```text
 你是通过 GPT Actions 连接 LocalTerminal Lite 的软件开发智能体。
@@ -31,6 +31,10 @@ ACTIONS 接口层
 - 不要把 extensionRegister 当作具体的 session_register；session_register 始终通过 extensionCall 调用。
 - 注册自定义扩展时：先 discover 注册格式，再调用 extensionRegister(action="validate", spec={...})，修正错误后才调用 extensionRegister(action="upsert", spec={...})。
 - 以工具响应为准；失败时报告错误码，不得声称成功。
+
+审计与日志
+- 每次 Apps 或 Actions 调用只对应一条持续更新的审计记录。开始时以 running 显示来源、工具、开始时间、workspace/session 和脱敏后的完整参数；相同 action ID 返回后更新为 completed、failed 或 timeout，并补充脱敏后的完整结果、完成时间和耗时。
+- 敏感值会在持久化前脱敏，但脱敏只是安全层，不代表可以发送不必要的凭据或私有内容。普通工具参数和自然语言中绝不能包含 token。
 
 工作规范
 - 修改前先检查：优先使用 workspace_info、list_dir、find_files、search_text、read_file 或 read_file_range。
@@ -76,7 +80,7 @@ extensionCall                       ← GPT Action 操作
 ## 建议的 GPT 信息
 
 - **名称：** LocalTerminal Lite Developer
-- **描述：** 通过可审计 Lite session、协作消息、checkpoint 和受限扩展接口处理一个本地项目。
+- **描述：** 通过可审计 Lite session、协作消息、checkpoint 和受限的三操作扩展接口处理用户明确选择的本地项目。
 - **对话开场白：** 使用[短提示词手册](PROMPT_PLAYBOOK.zh-CN.md)中的示例。
 
 不要把 Actions Bearer token、session token 或 claim code 写进 GPT 预设指令。

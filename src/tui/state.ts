@@ -108,6 +108,7 @@ export type TuiSnapshot = {
 
 export class TuiController {
   private diff: WorkspaceDiffTracker;
+  private snapshotCache?: { revision: string; snapshot: TuiSnapshot };
   private readonly handoffs = new Map<string, string>();
   private readonly remindedAt = new Map<string, { sound: number; notification: number }>();
   private stopped = false;
@@ -124,15 +125,18 @@ export class TuiController {
   start(): void { this.diff.start(); void this.refreshUpdateStatus(); }
 
   snapshot(): TuiSnapshot {
-    return { state: this.currentRuntime.store.snapshot(), diff: this.diff.snapshot(), logs: [...this.currentRuntime.logs], runtime: this.currentRuntime, update: { ...this.update } };
+    const revision = this.renderRevision();
+    if (this.snapshotCache?.revision === revision) return this.snapshotCache.snapshot;
+    const snapshot = { state: this.currentRuntime.store.snapshot(), diff: this.diff.snapshot(), logs: [...this.currentRuntime.logs], runtime: this.currentRuntime, update: { ...this.update } };
+    this.snapshotCache = { revision, snapshot };
+    return snapshot;
   }
 
   renderRevision(): string {
-    const diff = this.diff.snapshot();
     return [
       this.currentRuntime.store.revision(),
-      this.currentRuntime.logs.length,
-      diff.loading, diff.updatedAt || '', diff.lines.length, diff.error || '', diff.unavailableReason || '',
+      this.currentRuntime.runtimeLogRevision(),
+      this.diff.revision(),
       this.update.checking, this.update.latestVersion || '', this.update.error || '',
       this.currentRuntime.runtimeHealth().phase,
     ].join(':');
@@ -161,7 +165,10 @@ export class TuiController {
     this.currentRuntime.log(`Installing LocalTerminal Lite ${this.update.latestVersion}...`);
     const clusterVersions = this.currentRuntime.clusterVersions();
     const members = this.currentRuntime.clusterMemberCount();
-    await installUpdate(this.update.latestVersion);
+    await installUpdate(this.update.latestVersion, {
+      restartReason: 'tui_update_requested',
+      runtimeLog: (message, level) => this.currentRuntime.log(message, level),
+    });
     this.update = { ...this.update, updateAvailable: false, restartRequired: true, runningClusterVersions: clusterVersions };
     this.currentRuntime.log(this.text(
       `Update installed without stopping ${members} running process(es). Existing Apps/Actions service remains online. Restart each TUI individually to move the cluster to ${this.update.latestVersion}; restart the current leader last for the smallest interruption.`,
@@ -453,6 +460,7 @@ export class TuiController {
       const result = await this.reconfigure(next);
       this.currentRuntime = result.runtime;
       this.diff = new WorkspaceDiffTracker(this.currentRuntime.config);
+      this.snapshotCache = undefined;
       this.diff.start();
       this.currentRuntime.log(result.error || 'Runtime settings applied from TUI.', result.error ? 'error' : 'info');
     } catch (error) {

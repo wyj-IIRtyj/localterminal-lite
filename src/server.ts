@@ -15,10 +15,12 @@ import { WorkspaceCatalog } from './workspace-catalog.js';
 import { PortClusterRegistry, tokenHash, type ClusterMember } from './cluster.js';
 import { CLUSTER_PROTOCOL_VERSION, CURRENT_VERSION } from './version.js';
 import { commandPassiveLock, disarmAllSessionResources, passiveLockStatus, reapSessionResources, startPassiveLockService } from './session-resources.js';
-import type { LiteConfig, LiteSettings, ToolResponse } from './types.js';
+import type { LiteConfig, LiteSettings, ToolAuditEvent, ToolResponse } from './types.js';
 import { assessRuntimeEnvironment, type RuntimeEnvironmentStatus } from './config.js';
+import { ControlChannelMonitor, isExternalControlUrl, type ControlChannelState } from './control-channel.js';
+import { writeRuntimeLifecycle, type RuntimeLifecyclePhase } from './runtime-lifecycle.js';
 
-export type RuntimeLog = { at: string; level: 'info' | 'error'; message: string };
+export type RuntimeLog = { at: string; level: 'info' | 'error'; message: string; audit?: ToolAuditEvent };
 export type RuntimeHealth = { phase: 'active' | 'revalidating' | 'degraded' | 'shutting_down'; environment: RuntimeEnvironmentStatus; message?: string; lastCheckedAt: string };
 
 /**
@@ -47,9 +49,11 @@ export class LiteRuntime {
   private heartbeatTimer?: ReturnType<typeof setInterval>;
   private electionTimer?: ReturnType<typeof setInterval>;
   private resumeTimer?: ReturnType<typeof setInterval>;
+  private controlChannel?: ControlChannelMonitor;
   private lastMonotonicTick = performance.now();
   private revalidating = false;
   private closing?: Promise<void>;
+  private runtimeLogRevisionValue = 0;
   private healthState: RuntimeHealth = { phase: 'active', environment: { status: 'valid' }, lastCheckedAt: new Date().toISOString() };
   readonly workspaceCatalog: WorkspaceCatalog;
 
@@ -58,17 +62,31 @@ export class LiteRuntime {
     reapSessionResources(config);
     this.store = new LiteStore(config.stateDir);
     const builtins = createBuiltinTools(config, this.store);
-    this.extensions = new ExtensionService(config, this.store, builtins);
+    this.extensions = new ExtensionService(config, this.store, builtins, (event) => this.logAuditEvent(event));
     this.mcp = new LiteMcpTransport(this.extensions);
     this.app = express();
     this.app.disable('x-powered-by');
     this.app.use(express.json({ limit: '256kb' }));
     this.internalServer = http.createServer(this.app);
     this.configureRoutes();
+    this.persistRuntimeLifecycle('starting', 'runtime constructed');
   }
 
+  private persistRuntimeLifecycle(phase: RuntimeLifecyclePhase, reason?: string): void {
+    try {
+      writeRuntimeLifecycle(this.config.stateDir, {
+        workspace: this.config.workspaceDir,
+        pid: process.pid,
+        phase,
+        reason,
+        pendingActions: this.extensions.activeActionCount(),
+        controlChannel: this.controlChannel?.snapshot().phase,
+      });
+    } catch { /* lifecycle persistence must not mask the original runtime failure */ }
+  }
 
   runtimeHealth(): RuntimeHealth { return { ...this.healthState, environment: { ...this.healthState.environment } }; }
+  controlChannelStatus(): ControlChannelState | undefined { return this.controlChannel?.snapshot(); }
 
   private settingsSnapshot(): LiteSettings {
     return {
@@ -91,10 +109,15 @@ export class LiteRuntime {
     if (this.revalidating || this.healthState.phase === 'shutting_down') return this.runtimeHealth();
     this.revalidating = true;
     this.healthState = { ...this.healthState, phase: 'revalidating', message: reason, lastCheckedAt: new Date().toISOString() };
+    this.persistRuntimeLifecycle('revalidating', reason);
+    // Active actions are live in-memory operations, not stale persisted records.
+    // Resume recovery must not mark them failed while their side effects continue.
+    if (this.controlChannel && !/control channel/i.test(reason)) void this.controlChannel.recheck();
     try {
       const environment = assessRuntimeEnvironment(this.settingsSnapshot());
       if (environment.status !== 'valid') {
         this.healthState = { phase: 'degraded', environment, message: environment.message, lastCheckedAt: new Date().toISOString() };
+        this.persistRuntimeLifecycle('degraded', environment.message);
         this.log(`Runtime degraded: ${environment.message}`, 'error');
         return this.runtimeHealth();
       }
@@ -108,10 +131,13 @@ export class LiteRuntime {
       this.publishWorkspaceRuntime();
       try { await this.diffCapabilityProbe(); } catch (error) { this.log(`Git capability revalidation failed: ${error instanceof Error ? error.message : String(error)}`, 'error'); }
       this.healthState = { phase: 'active', environment, lastCheckedAt: new Date().toISOString() };
+      this.persistRuntimeLifecycle('active', reason);
+      this.log(`Runtime recovery completed: workspace, local servers, cluster registration, and log persistence revalidated after ${reason}.`);
       return this.runtimeHealth();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.healthState = { phase: 'degraded', environment: { status: 'state_dir_unavailable', message }, message, lastCheckedAt: new Date().toISOString() };
+      this.persistRuntimeLifecycle('degraded', message);
       this.log(`Runtime revalidation failed: ${message}`, 'error');
       return this.runtimeHealth();
     } finally { this.revalidating = false; }
@@ -210,11 +236,74 @@ export class LiteRuntime {
     return this.mcp.activeSessions();
   }
 
+  runtimeLogRevision(): number { return this.runtimeLogRevisionValue; }
+
+  private logAuditEvent(event: ToolAuditEvent): void {
+    const suffix = event.status === 'running' ? '' : ` · ${event.durationMs}ms`;
+    const error = event.error?.code ? ` · ${event.error.code}` : '';
+    const entry: RuntimeLog = {
+      at: event.timestamp,
+      level: event.status === 'failed' || event.status === 'timeout' ? 'error' : 'info',
+      message: `Action ${event.status}: ${event.action} · session ${event.session}${suffix}${error}`,
+      audit: structuredClone(event),
+    };
+    const index = this.logs.findIndex((item) => item.audit?.id === event.id);
+    if (index >= 0) this.logs[index] = entry;
+    else this.logs.push(entry);
+    try { appendWorkspaceLog(this.config.stateDir, entry); } catch { /* logging must never crash the runtime */ }
+    if (this.logs.length > 500) this.logs.shift();
+    this.runtimeLogRevisionValue += 1;
+  }
+
   log(message: string, level: RuntimeLog['level'] = 'info'): void {
     const entry = { at: new Date().toISOString(), level, message };
     this.logs.push(entry);
     try { appendWorkspaceLog(this.config.stateDir, entry); } catch { /* logging must never crash the runtime */ }
     if (this.logs.length > 500) this.logs.shift();
+    this.runtimeLogRevisionValue += 1;
+  }
+
+  private startControlChannelMonitor(): void {
+    const baseUrl = this.resolvedPublicBaseUrl();
+    const ownsPublicEndpoint = this.config.port === 0 || Boolean(this.publicServer?.listening);
+    if (!ownsPublicEndpoint || !isExternalControlUrl(baseUrl) || this.controlChannel) return;
+    let connectedOnce = false;
+    let outageClassification: ControlChannelState['classification'];
+    let reconnectingLogged = false;
+    this.controlChannel = new ControlChannelMonitor({
+      baseUrl,
+      expectedWorkspaceId: workspaceId(this.config.workspaceDir),
+      onState: (state) => {
+        if (!['connected', 'recovering', 'disconnected'].includes(state.phase)) return;
+        if (this.healthState.phase !== 'shutting_down') this.persistRuntimeLifecycle(this.healthState.phase, state.message);
+        if (state.phase === 'connected') {
+          if (outageClassification) this.log('Control channel reconnected; validating local runtime state.');
+          else if (!connectedOnce) this.log('Control channel connected.');
+          connectedOnce = true;
+          outageClassification = undefined;
+          reconnectingLogged = false;
+          return;
+        }
+        if (state.phase === 'recovering') {
+          if (outageClassification && !reconnectingLogged) {
+            reconnectingLogged = true;
+            this.log('Control channel reconnecting.');
+          }
+          return;
+        }
+        if (!outageClassification || outageClassification !== state.classification) {
+          this.log(`Control channel disconnected: ${state.classification || 'unknown'} · retry ${state.attempt} in ${state.retryDelayMs}ms · ${state.message || ''}`, 'error');
+        }
+        outageClassification = state.classification;
+      },
+      onRecovered: async () => { await this.revalidateAfterResume('control channel reconnected'); },
+    });
+    this.controlChannel.start();
+  }
+
+  private stopControlChannelMonitor(): void {
+    this.controlChannel?.stop();
+    this.controlChannel = undefined;
   }
 
   async start(): Promise<void> {
@@ -231,6 +320,8 @@ export class LiteRuntime {
       this.publishWorkspaceRuntime();
       this.startConfiguredPassiveLock();
       this.startResumeMonitor();
+      this.startControlChannelMonitor();
+      this.persistRuntimeLifecycle('active', 'standalone runtime started');
       return;
     }
     this.cluster = new PortClusterRegistry(path.dirname(this.config.settingsPath), this.config.host, this.config.port);
@@ -273,6 +364,8 @@ export class LiteRuntime {
     this.publishWorkspaceRuntime();
     this.startConfiguredPassiveLock();
     this.startResumeMonitor();
+    this.startControlChannelMonitor();
+    this.persistRuntimeLifecycle('active', 'cluster runtime started');
   }
 
   private publishWorkspaceRuntime(): void {
@@ -316,6 +409,7 @@ export class LiteRuntime {
       this.address = server.address() as AddressInfo;
       this.cluster.setLeader();
       this.log(`This workspace became leader for ${this.config.host}:${this.config.port}`);
+      this.startControlChannelMonitor();
     } catch (error) {
       server.close();
       const detail = error as NodeJS.ErrnoException;
@@ -327,8 +421,26 @@ export class LiteRuntime {
     const gateway = express();
     gateway.disable('x-powered-by');
     gateway.use(express.json({ limit: '256kb' }));
-    gateway.get('/health', (_req, res) => {
+    gateway.get('/health', async (req, res) => {
       const state = this.cluster!.read();
+      const requestedWorkspaceId = typeof req.query.workspaceId === 'string' ? req.query.workspaceId : undefined;
+      if (requestedWorkspaceId) {
+        const target = state.members.find((item) => item.workspaceId === requestedWorkspaceId);
+        if (!target) {
+          res.status(503).json({ ok: false, product: 'localterminal-lite', error: `Workspace ${requestedWorkspaceId} is not registered on this port.` });
+          return;
+        }
+        try {
+          const response = await fetch(`http://127.0.0.1:${target.internalPort}/health?workspaceId=${encodeURIComponent(requestedWorkspaceId)}`, { signal: AbortSignal.timeout(2_000) });
+          if (!response.ok) {
+            res.status(503).json({ ok: false, product: 'localterminal-lite', error: `Workspace ${requestedWorkspaceId} internal health returned HTTP ${response.status}.` });
+            return;
+          }
+        } catch (error) {
+          res.status(503).json({ ok: false, product: 'localterminal-lite', error: `Workspace ${requestedWorkspaceId} internal health failed: ${error instanceof Error ? error.message : String(error)}` });
+          return;
+        }
+      }
       res.json({ ok: true, product: 'localterminal-lite', version: CURRENT_VERSION, protocolVersion: CLUSTER_PROTOCOL_VERSION, clustered: true, leaderPid: process.pid, workspaces: state.members.map((item) => ({ id: item.workspaceId, workspaceDir: item.workspaceDir, pid: item.pid, version: item.appVersion, protocolVersion: item.protocolVersion })) });
     });
     gateway.get('/openapi.json', (_req, res) => res.json(buildOpenApi({ ...this.config, publicBaseUrl: this.resolvedPublicBaseUrl() })));
@@ -353,10 +465,12 @@ export class LiteRuntime {
 
   private async closeOnce(): Promise<void> {
     this.healthState = { ...this.healthState, phase: 'shutting_down', lastCheckedAt: new Date().toISOString() };
+    this.persistRuntimeLifecycle('shutting_down', 'runtime close requested');
     disarmAllSessionResources(this.config);
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     if (this.electionTimer) clearInterval(this.electionTimer);
     if (this.resumeTimer) clearInterval(this.resumeTimer);
+    this.stopControlChannelMonitor();
 
     // Stop accepting public traffic before removing this member from the shared
     // registry. Doing this in the opposite order leaves a live gateway with an
@@ -377,10 +491,20 @@ export class LiteRuntime {
       try { commandPassiveLock(this.config, 'stop'); }
       catch (error) { this.log(error instanceof Error ? error.message : String(error), 'error'); }
     }
+    this.persistRuntimeLifecycle('stopped', 'runtime closed');
   }
 
   private configureRoutes(): void {
-    this.app.get('/health', (_req, res) => res.json({ ok: true, product: 'localterminal-lite', version: CURRENT_VERSION, toolsExposed: 3, sessions: this.store.listSessions().length, activeMcpSessions: this.activeMcpSessions() }));
+    this.app.get('/health', (req, res) => {
+      const requestedWorkspaceId = typeof req.query.workspaceId === 'string' ? req.query.workspaceId : undefined;
+      const localWorkspaceId = workspaceId(this.config.workspaceDir);
+      const healthy = this.healthState.phase === 'active' || this.healthState.phase === 'revalidating';
+      if (requestedWorkspaceId && requestedWorkspaceId !== localWorkspaceId) {
+        res.status(503).json({ ok: false, product: 'localterminal-lite', workspaceId: localWorkspaceId, error: 'Workspace route mismatch.' });
+        return;
+      }
+      res.status(healthy ? 200 : 503).json({ ok: healthy, product: 'localterminal-lite', version: CURRENT_VERSION, workspaceId: localWorkspaceId, toolsExposed: 3, sessions: this.store.listSessions().length, activeMcpSessions: this.activeMcpSessions(), pendingActions: this.extensions.activeActionCount(), runtime: this.runtimeHealth(), controlChannel: this.controlChannelStatus() });
+    });
     this.app.get('/openapi.json', (_req, res) => res.json(buildOpenApi({ ...this.config, publicBaseUrl: this.resolvedPublicBaseUrl() })));
     this.app.get('/openapi-3.1.json', (_req, res) => res.json(buildOpenApi({ ...this.config, publicBaseUrl: this.resolvedPublicBaseUrl() })));
     this.app.all('/mcp/:connectorKey', async (req, res) => {

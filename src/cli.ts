@@ -132,6 +132,10 @@ async function main(): Promise<void> {
     console.log(JSON.stringify(verifyRuntimeResources()));
     return;
   }
+  if (process.argv.includes('--version') || process.argv.includes('-v')) {
+    console.log(CURRENT_VERSION);
+    return;
+  }
   if (process.argv.includes('--help') || process.argv.includes('-h')) {
     help();
     return;

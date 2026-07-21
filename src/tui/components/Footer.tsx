@@ -8,7 +8,7 @@ function hints(tab: number, detail: Detail | undefined, zh: boolean): string {
   if (tab === 3) return zh ? '滚轮/↑↓ 滚动   PgUp/PgDn 翻页   r 刷新   q 退出' : 'wheel/↑↓ scroll   PgUp/PgDn page   r refresh   q quit';
   if (tab === 4) return zh ? '滚轮/↑↓ 滚动   j/k 选择   e 新增   x 删除   q 退出' : 'wheel/↑↓ scroll   j/k select   e add   x remove   q quit';
   if (tab === 5) return zh ? '滚轮/↑↓ 滚动   c 修改配置   按住 v 显示凭据   k 轮换凭据   q 退出' : 'wheel/↑↓ scroll   c configure   hold v to reveal   k rotate   q quit';
-  return zh ? '滚轮/↑↓ 滚动   a 事实调用 开/关   q 退出' : 'wheel/↑↓ scroll   a audit facts on/off   q quit';
+  return zh ? '滚轮/↑↓ 滚动   PgUp/PgDn 翻页   a 调用详情 开/关   q 退出' : 'wheel/↑↓ scroll   PgUp/PgDn page   a call details on/off   q quit';
 }
 
 export function Footer({ tab, detail, theme, zh, notice }: { tab: number; detail?: Detail; theme: Theme; zh: boolean; notice?: string }) {

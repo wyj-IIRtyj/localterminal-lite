@@ -11,7 +11,7 @@ import { LiteRuntime } from '../dist/server.js';
 import { LiteStore, SESSION_TIMING } from '../dist/store.js';
 import { WorkspaceDiffTracker } from '../dist/diff.js';
 import { conversationGroups, logicalSessionGroups, selectedViewport } from '../dist/tui-model.js';
-import { phaseColor, presenceColor, themeFor } from '../dist/tui/state.js';
+import { phaseColor, presenceColor, themeFor, TuiController } from '../dist/tui/state.js';
 import { initialQuestionState, nextTextValue, optionAnswer, toggleSelectedOption, workspaceChoiceQuestion, workspaceOptionLabel } from '../dist/tui/form-model.js';
 import { assessRuntimeEnvironment, createDefaultSettings, loadLiteConfig, readLiteSettings, rotateLiteCredentials, saveLiteSettings, settingsPath, validateSettingsFeasibility } from '../dist/config.js';
 import { activeWorkspaceRuntimePids, appendWorkspaceLog, findAvailablePort, readWorkspaceLogs, readWorkspaceRegistry, resolveWorkspaceInput, upsertWorkspaceRecord, workspaceChoiceHint, workspaceId } from '../dist/instances.js';
@@ -624,10 +624,11 @@ test('workspace selector always exposes an explicit add-new action', () => {
   assert.equal(items[1].disabled, false);
 });
 
-test('credential reveal fails closed on every release packet', () => {
+test('credential reveal survives normalized release packets while v repeats continue', () => {
   assert.equal(nextCredentialVisibility(false, { name: 'v', eventType: 'press' }, true), true);
-  assert.equal(nextCredentialVisibility(true, { name: '', eventType: 'release' }, true), false);
-  assert.equal(nextCredentialVisibility(true, { name: 'unknown', eventType: 'release' }, true), false);
+  assert.equal(nextCredentialVisibility(true, { name: '', eventType: 'release' }, true), true);
+  assert.equal(nextCredentialVisibility(true, { name: 'unknown', eventType: 'release' }, true), true);
+  assert.equal(nextCredentialVisibility(true, { name: 'v', eventType: 'repeat' }, true), true);
   assert.equal(nextCredentialVisibility(true, { name: 'v', eventType: 'repeat' }, false), false);
 });
 
@@ -879,6 +880,13 @@ test('Actions identity, delegation, messages, ACK, completion audit, and continu
     assert.equal(continuation.context.inheritedFrom.id, main.session.id); assert.equal(continuation.context.inheritedFrom.finalSummary, 'Reviewed all child work and completed the root objective.');
     const permanentHistory = await call(server, 'session_history', { limit: 500, includeAncestors: true }, continuation.identity);
     assert.ok(permanentHistory.body.data.result.history.entries.some((entry) => entry.sessionId === main.session.id && entry.type === 'checkpoint'));
+    const actionFacts = server.runtime.store.auditFacts(500);
+    assert.ok(actionFacts.length > 10);
+    assert.equal(actionFacts.every((fact) => fact.source === 'actions'), true);
+    assert.equal(actionFacts.every((fact) => ['running', 'completed', 'failed', 'timeout'].includes(fact.status)), true);
+    assert.equal(new Set(actionFacts.map((fact) => fact.id)).size, actionFacts.length);
+    const actionRuntimeLogs = server.runtime.logs.filter((entry) => entry.audit);
+    assert.equal(new Set(actionRuntimeLogs.map((entry) => entry.audit.id)).size, actionRuntimeLogs.length);
   } finally { await server.close(); }
 });
 
@@ -912,10 +920,10 @@ test('workspace diff tracker includes tracked and untracked changes while exclud
   try {
     execFileSync('git', ['init'], { cwd: dirs.workspaceDir }); execFileSync('git', ['config', 'user.email', 'lite@example.test'], { cwd: dirs.workspaceDir }); execFileSync('git', ['config', 'user.name', 'Lite Test'], { cwd: dirs.workspaceDir });
     execFileSync('git', ['add', 'hello.txt'], { cwd: dirs.workspaceDir }); execFileSync('git', ['commit', '-m', 'baseline'], { cwd: dirs.workspaceDir });
-    fs.writeFileSync(path.join(dirs.workspaceDir, 'hello.txt'), 'changed lite\n'); fs.writeFileSync(path.join(dirs.workspaceDir, 'new.txt'), 'new line\n'); fs.writeFileSync(path.join(dirs.stateDir, 'internal.txt'), 'hidden\n');
+    fs.writeFileSync(path.join(dirs.workspaceDir, 'hello.txt'), 'changed lite\n'); fs.writeFileSync(path.join(dirs.workspaceDir, 'new.txt'), 'new line\n'); fs.mkdirSync(path.join(dirs.workspaceDir, 'large-untracked')); fs.writeFileSync(path.join(dirs.workspaceDir, 'large-untracked', 'nested.txt'), 'nested content\n'); fs.writeFileSync(path.join(dirs.stateDir, 'internal.txt'), 'hidden\n');
     const tracker = new WorkspaceDiffTracker({ ...dirs, settingsPath: '', host: '127.0.0.1', port: 0, connectorKey: CONNECTOR_KEY, actionsToken: ACTIONS_TOKEN, publicBaseUrl: '', maxOutputChars: 20_000, commandTimeoutSec: 10, uiLanguage: 'en', uiTheme: 'dark' });
     await tracker.refresh(); const diff = tracker.snapshot(); const text = diff.lines.join('\n');
-    assert.match(text, /-hello lite/); assert.match(text, /\+changed lite/); assert.match(text, /diff --git a\/new.txt b\/new.txt/); assert.doesNotMatch(text, /internal.txt/);
+    assert.match(text, /-hello lite/); assert.match(text, /\+changed lite/); assert.match(text, /diff --git a\/new.txt b\/new.txt/); assert.match(text, /\?\? large-untracked\/ \(untracked directory; contents collapsed\)/); assert.doesNotMatch(text, /nested content/); assert.doesNotMatch(text, /internal.txt/);
   } finally { fs.rmSync(dirs.workspaceDir, { recursive: true, force: true }); }
 });
 
@@ -999,7 +1007,7 @@ test('checkpoint reminder, block, and stale transitions use fixed non-resetting 
   } finally { fs.rmSync(dirs.workspaceDir, { recursive: true, force: true }); }
 });
 
-test('extension registry and workspace tools require identity and audit redacts bounded arguments', async () => {
+test('extension registry and workspace tools require identity and audit keeps complete sanitized arguments and results', async () => {
   const server = await createRuntime();
   try {
     const denied = await call(server, 'read_file', { path: 'hello.txt' }); assert.equal(denied.body.error.code, 'IDENTITY_REQUIRED');
@@ -1013,7 +1021,12 @@ test('extension registry and workspace tools require identity and audit redacts 
     await call(server, 'message_send', { to: main.session.id, body: 'sensitive body' }, identity);
     const history = fs.readFileSync(path.join(server.dirs.stateDir, 'history', `${main.session.id}.jsonl`), 'utf8');
     assert.equal(history.includes(identity.sessionToken), false); assert.ok(history.includes('[REDACTED'));
-    for (const line of history.trim().split('\n').map(JSON.parse).filter((entry) => entry.type === 'tool_audit')) assert.ok(JSON.stringify(line.data.args).length <= 4000);
+    const facts = server.runtime.store.auditFacts(100);
+    const customAudit = facts.find((fact) => fact.action === 'echo_value');
+    assert.equal(customAudit.status, 'completed');
+    assert.equal(customAudit.args.value, 'custom-ok');
+    assert.equal(customAudit.result.data.result.stdout, 'custom-ok');
+    assert.equal(facts.filter((fact) => fact.id === customAudit.id).length, 1);
   } finally { await server.close(); }
 });
 
@@ -1028,6 +1041,10 @@ test('events cap at five, persist until ACK, subscriptions deliver milestones, a
     assert.ok(store.pendingEvents(observer.session.id).some((event) => event.kind === 'milestone'));
     for (let i = 8; i < 5100; i += 1) store.sendMessage(rootSession.session.id, observer.session.id, `message-${i}`);
     assert.equal(store.snapshot().messages.length, 5100);
+    const reloaded = new LiteStore(dirs.stateDir);
+    assert.equal(reloaded.snapshot().messages.length, 5100);
+    assert.equal(reloaded.pendingEvents(observer.session.id).length, 5);
+    assert.equal(reloaded.revision(), store.revision());
   } finally { fs.rmSync(dirs.workspaceDir, { recursive: true, force: true }); }
 }, 300000);
 
@@ -1060,6 +1077,13 @@ test('Apps exposes only three tools and binds openai/session only after explicit
     assert.ok(verified.data.result.structuredContent.data.tools.length > 20);
     const bound = await rpcPost(url, { jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'extension_discover', arguments: { includeSchemas: false }, _meta: { 'openai/session': 'chat-a' } } }, init.sessionId);
     assert.ok(bound.data.result.structuredContent.data.tools.length > 20);
+    const appFacts = server.runtime.store.auditFacts(100);
+    assert.ok(appFacts.some((fact) => fact.source === 'apps' && fact.action === 'extension_discover' && fact.status === 'completed'));
+    assert.equal(appFacts.every((fact) => fact.source === 'apps'), true);
+    const completedAppCall = appFacts.find((fact) => fact.action === 'extension_discover' && fact.result);
+    assert.ok(completedAppCall.timestamp);
+    assert.ok(completedAppCall.completedAt);
+    assert.equal(completedAppCall.result.ok, true);
     const differentChat = await rpcPost(url, { jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'extension_discover', arguments: {}, _meta: { 'openai/session': 'chat-b' } } }, init.sessionId);
     assert.equal(differentChat.data.result.structuredContent.data.identityRequired, true);
   } finally { await server.close(); }
@@ -1146,9 +1170,10 @@ test('project copy constraints forbid exposing implementation requirements as UI
 test('credential reveal has a fail-closed deadline when terminals omit key release', () => {
   const app = fs.readFileSync(new URL('../src/tui/App.tsx', import.meta.url), 'utf8');
   assert.match(app, /credentialRevealDeadline/);
-  assert.match(app, /performance\.now\(\) \+ 350/);
+  assert.match(app, /performance\.now\(\) \+ 450/);
   assert.match(app, /setInterval\([\s\S]*setRevealCredentials\(false\)/);
-  assert.match(app, /event\.eventType === 'release'[\s\S]*credentialRevealDeadline\.current = 0/);
+  assert.doesNotMatch(app, /event\.eventType === 'release'[\s\S]*credentialRevealDeadline\.current = 0/);
+  assert.match(app, /event\.eventType !== 'release'[\s\S]*credentialRevealDeadline\.current = performance\.now\(\) \+ 450/);
 });
 
 test('release installers resume partial downloads and repair incomplete layouts', () => {
@@ -1157,10 +1182,20 @@ test('release installers resume partial downloads and repair incomplete layouts'
     assert.match(source, /--continue-at|-C -/);
     assert.match(source, /\.part/);
     assert.match(source, /install_dir\/releases|\$install_dir\/releases/);
+    assert.match(source, /Invalid LocalTerminal Lite version/);
+    assert.match(source, /Refusing unsafe installation root/);
+    assert.match(source, /--verify-installation/);
+    assert.match(source, /Release version mismatch/);
   }
   const windows = fs.readFileSync(new URL('../scripts/install-windows.ps1', import.meta.url), 'utf8');
   assert.match(windows, /curl\.exe[\s\S]*--continue-at/);
   assert.match(windows, /\$\{Version\}: \$InstallDir/);
+  assert.match(windows, /Invalid LocalTerminal Lite version/);
+  assert.match(windows, /Refusing unsafe installation root/);
+  assert.match(windows, /--verify-installation/);
+  assert.match(windows, /CandidateVerified/);
+  assert.match(windows, /InstalledVerified/);
+  assert.match(windows, /Attempt -le 10/);
   assert.doesNotMatch(windows, /\$Version: \$InstallDir/);
 });
 
@@ -1170,6 +1205,9 @@ test('macOS binary release packages and resolves the passive-lock helper source'
   assert.match(resources, /path\.dirname\(process\.execPath\)/);
   assert.match(workflow, /mac-one-shot-awake-lock\.swift/);
   assert.match(workflow, /--verify-installation/);
+  assert.match(workflow, /bun-darwin-x64-baseline/);
+  assert.match(workflow, /bun-linux-x64-baseline/);
+  assert.match(workflow, /bun-windows-x64-baseline/);
 });
 
 test('idle TUI refresh is revision-driven and never forces periodic deep snapshot renders', () => {
@@ -1179,6 +1217,18 @@ test('idle TUI refresh is revision-driven and never forces periodic deep snapsho
   assert.match(app, /nextRevision !== renderedRevision/);
   assert.doesNotMatch(app, /tickReminders\(\);\s*refresh\(\)/);
   assert.doesNotMatch(app, /setInterval\([^)]*500\)/);
+});
+
+test('TUI snapshots are referentially cached until a runtime revision changes', () => {
+  const dirs = tempWorkspace();
+  const runtime = new LiteRuntime({ ...dirs, settingsPath: path.join(dirs.stateDir, 'test-settings.json'), host: '127.0.0.1', port: 0, connectorKey: CONNECTOR_KEY, actionsToken: ACTIONS_TOKEN, publicBaseUrl: 'http://127.0.0.1:0', maxOutputChars: 20_000, commandTimeoutSec: 10, uiLanguage: 'zh-CN', uiTheme: 'dark' });
+  const controller = new TuiController(runtime, async () => { throw new Error('not used'); });
+  try {
+    const first = controller.snapshot();
+    assert.equal(controller.snapshot(), first);
+    runtime.log('snapshot revision changed');
+    assert.notEqual(controller.snapshot(), first);
+  } finally { fs.rmSync(dirs.workspaceDir, { recursive: true, force: true }); }
 });
 
 test('runtime logs rotate at bounded size and tail pages avoid loading the full file', () => {

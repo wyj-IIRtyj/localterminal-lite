@@ -4,7 +4,7 @@ import path from 'node:path';
 import type {
   AppSessionBinding, CustomExtensionSpec, JsonObject, LiteMessage, LiteSession, SessionCheckpoint,
   SessionEvent, SessionEventKind, SessionIdentity, SessionPhase, StoredState, TaskPackage,
-  SessionHistoryEntry,
+  SessionHistoryEntry, ToolAuditEvent,
 } from './types.js';
 
 const EMPTY_STATE: StoredState = {
@@ -20,6 +20,10 @@ type LegacySession = {
   note?: string; createdAt: string; updatedAt: string;
 };
 type LegacyState = { schemaVersion: 1; revision: number; sessions: LegacySession[]; messages: LiteMessage[]; extensions: CustomExtensionSpec[] };
+type StoreJournalInput =
+  | { kind: 'session_touch'; sessionId: string; updatedAt: string; lastActivityAt?: string; checkpointStartedAt?: string }
+  | { kind: 'message'; message: LiteMessage; event: SessionEvent };
+type StoreJournalEntry = StoreJournalInput & { revision: number };
 
 export class LiteError extends Error {
   constructor(readonly code: string, message: string, readonly details?: JsonObject, readonly retryable = false) {
@@ -70,16 +74,30 @@ export function publicSession(session: LiteSession): JsonObject {
   };
 }
 
+type AuditFact = ToolAuditEvent & {
+  sessionId: string;
+  sessionName: string;
+  at: string;
+  tool: string;
+  ok: boolean;
+  errorCode?: string;
+};
+
 export class LiteStore {
   private state: StoredState;
   private readonly statePath: string;
   private readonly historyDir: string;
+  private readonly journalPath: string;
   private readonly transientClaimCodes = new Map<string, string>();
-  private auditCache?: Array<{ sessionId: string; sessionName: string; at: string; tool: string; ok: boolean; durationMs: number; errorCode?: string; args: unknown }>;
+  private readonly historyCache = new Map<string, SessionHistoryEntry[]>();
+  private auditCache?: AuditFact[];
+  private journalEntries = 0;
+  private journalBytes = 0;
 
   constructor(stateDir: string, private readonly now: () => number = Date.now) {
     this.statePath = path.join(stateDir, 'state.json');
     this.historyDir = path.join(stateDir, 'history');
+    this.journalPath = path.join(stateDir, 'state.journal.jsonl');
     mkdirSync(this.historyDir, { recursive: true, mode: 0o700 });
     this.state = this.load();
   }
@@ -204,14 +222,20 @@ export class LiteStore {
     session.checkpointStartedAt ||= this.iso();
     session.controller.lastActivityAt = this.iso();
     session.updatedAt = this.iso();
-    this.save();
+    this.appendJournal({
+      kind: 'session_touch', sessionId: session.id, updatedAt: session.updatedAt,
+      lastActivityAt: session.controller.lastActivityAt, checkpointStartedAt: session.checkpointStartedAt,
+    });
   }
 
   touchControl(sessionId: string): void {
     const session = this.requireSession(sessionId);
     if (session.controller && session.presence === 'claimed') session.controller.lastActivityAt = this.iso();
     session.updatedAt = this.iso();
-    this.save();
+    this.appendJournal({
+      kind: 'session_touch', sessionId: session.id, updatedAt: session.updatedAt,
+      lastActivityAt: session.controller?.lastActivityAt, checkpointStartedAt: session.checkpointStartedAt,
+    });
   }
 
   checkpoint(sessionId: string, input: JsonObject): LiteSession {
@@ -373,8 +397,8 @@ export class LiteStore {
     this.state.messages.push(message);
     this.appendHistory(sender.id, 'message_sent', message as unknown as JsonObject);
     this.appendHistory(recipient.id, 'message_received', message as unknown as JsonObject);
-    this.emitEvent(recipient.id, sender.id, 'message', { message });
-    this.save();
+    const event = this.emitEvent(recipient.id, sender.id, 'message', { message });
+    this.appendJournal({ kind: 'message', message, event });
     return structuredClone(message);
   }
 
@@ -384,8 +408,8 @@ export class LiteStore {
     const message: LiteMessage = { id: `msg_${randomUUID()}`, from: 'user', to: recipient.id, source: 'user', body: nonEmpty(body, 'body', 20_000), createdAt: this.iso() };
     this.state.messages.push(message);
     this.appendHistory(recipient.id, 'user_message_received', message as unknown as JsonObject);
-    this.emitEvent(recipient.id, 'user', 'message', { message, source: 'user' });
-    this.save();
+    const event = this.emitEvent(recipient.id, 'user', 'message', { message, source: 'user' });
+    this.appendJournal({ kind: 'message', message, event });
     return structuredClone(message);
   }
 
@@ -456,21 +480,86 @@ export class LiteStore {
     });
   }
 
-  auditFacts(limit = 500): Array<{ sessionId: string; sessionName: string; at: string; tool: string; ok: boolean; durationMs: number; errorCode?: string; args: unknown }> {
-    this.auditCache ||= this.state.sessions.flatMap((session) => this.readHistory(session.id)
-      .filter((entry) => entry.type === 'tool_audit')
-      .map((entry) => ({ sessionId: session.id, sessionName: session.name, at: entry.at, ...(entry.data as { tool: string; ok: boolean; durationMs: number; errorCode?: string; args: unknown }) })))
+  auditFacts(limit = 500): AuditFact[] {
+    this.auditCache ||= this.state.sessions.flatMap((session) => this.auditFactsFromHistory(session))
       .sort((a, b) => a.at.localeCompare(b.at));
     return structuredClone(this.auditCache.slice(-Math.max(1, Math.min(5000, limit))));
   }
 
-  audit(sessionId: string, entry: { tool: string; startedAt: string; durationMs: number; ok: boolean; errorCode?: string; args: JsonObject }): void {
+  auditEvent(sessionId: string, event: ToolAuditEvent): ToolAuditEvent {
     const session = this.requireSession(sessionId);
-    const sanitized = this.sanitize(entry.args);
-    const encoded = JSON.stringify(sanitized);
-    const args = encoded.length <= 4000 ? sanitized : { truncated: true, preview: encoded.slice(0, 3800) };
-    this.appendHistory(sessionId, 'tool_audit', { ...entry, args });
-    if (this.auditCache) this.auditCache.push({ sessionId: session.id, sessionName: session.name, at: this.iso(), tool: entry.tool, ok: entry.ok, durationMs: entry.durationMs, errorCode: entry.errorCode, args });
+    const sensitiveValues = this.collectSensitiveValues(event.args);
+    const args = this.sanitize(event.args, '', sensitiveValues);
+    const result = this.sanitize(event.result, '', sensitiveValues);
+    const error = event.error ? this.sanitize(event.error, '', sensitiveValues) : undefined;
+    const data = {
+      ...event,
+      error,
+      args,
+      result,
+      // Compatibility fields keep older history readers and continuation projections useful.
+      tool: event.action,
+      ok: event.status === 'completed',
+      startedAt: event.timestamp,
+      errorCode: event.error?.code,
+    } as unknown as JsonObject;
+    this.appendHistory(sessionId, 'tool_audit', data);
+    if (this.auditCache) {
+      const next = this.auditFact(session, { at: this.iso(), type: 'tool_audit', data });
+      const index = this.auditCache.findIndex((fact) => fact.sessionId === session.id && fact.id === event.id);
+      if (index >= 0) this.auditCache[index] = { ...this.auditCache[index], ...next, at: this.auditCache[index].at };
+      else this.auditCache.push(next);
+    }
+    return {
+      ...event,
+      args,
+      result,
+      error: error && typeof error === 'object' ? error as ToolAuditEvent['error'] : undefined,
+    };
+  }
+
+  private auditFactsFromHistory(session: LiteSession): AuditFact[] {
+    const facts = new Map<string, AuditFact>();
+    for (const entry of this.readHistory(session.id)) {
+      if (entry.type !== 'tool_audit') continue;
+      const next = this.auditFact(session, entry);
+      const previous = facts.get(next.id);
+      facts.set(next.id, previous ? { ...previous, ...next, at: previous.at, timestamp: previous.timestamp } : next);
+    }
+    return [...facts.values()];
+  }
+
+  private auditFact(session: LiteSession, entry: SessionHistoryEntry): AuditFact {
+    const data = entry.data as JsonObject;
+    const action = String(data.action || data.tool || 'unknown');
+    const rawStatus = typeof data.status === 'string' ? data.status : data.ok === true ? 'completed' : 'failed';
+    const status: ToolAuditEvent['status'] = rawStatus === 'started' ? 'running' : rawStatus === 'succeeded' ? 'completed'
+      : ['running', 'completed', 'failed', 'timeout'].includes(rawStatus) ? rawStatus as ToolAuditEvent['status'] : 'failed';
+    const errorCode = typeof data.errorCode === 'string'
+      ? data.errorCode
+      : data.error && typeof data.error === 'object' && typeof (data.error as JsonObject).code === 'string'
+        ? String((data.error as JsonObject).code)
+        : undefined;
+    return {
+      id: String(data.id || `legacy-${session.id}-${entry.at}-${action}`),
+      timestamp: String(data.timestamp || data.startedAt || entry.at),
+      completedAt: typeof data.completedAt === 'string' ? data.completedAt : undefined,
+      source: ['apps', 'actions', 'tui', 'test'].includes(String(data.source)) ? data.source as ToolAuditEvent['source'] : 'test',
+      action,
+      status,
+      durationMs: Number(data.durationMs || 0),
+      error: errorCode ? { code: errorCode } : undefined,
+      workspace: String(data.workspace || ''),
+      session: String(data.session || session.id),
+      args: data.args,
+      result: data.result,
+      sessionId: session.id,
+      sessionName: session.name,
+      at: String(data.timestamp || data.startedAt || entry.at),
+      tool: action,
+      ok: status === 'completed',
+      errorCode,
+    };
   }
 
   context(sessionId: string): JsonObject {
@@ -545,7 +634,7 @@ export class LiteStore {
     this.state.subscriptions = this.state.subscriptions.filter((item) => !deleted.has(item.subscriberSessionId) && !deleted.has(item.targetSessionId));
     this.state.appBindings = this.state.appBindings.filter((item) => !deleted.has(item.sessionId));
     for (const item of this.state.sessions) if (item.continuesSessionId && deleted.has(item.continuesSessionId)) item.predecessorDeleted = true;
-    for (const id of deleted) { rmSync(this.historyPath(id), { force: true }); this.transientClaimCodes.delete(id); }
+    for (const id of deleted) { rmSync(this.historyPath(id), { force: true }); this.transientClaimCodes.delete(id); this.historyCache.delete(id); }
     if (this.auditCache) this.auditCache = this.auditCache.filter((item) => !deleted.has(item.sessionId));
     this.save();
     return { deleted: [...deleted] };
@@ -639,19 +728,44 @@ export class LiteStore {
   private iso(): string { return new Date(this.now()).toISOString(); }
   private historyPath(sessionId: string): string { return path.join(this.historyDir, `${sessionId}.jsonl`); }
   private appendHistory(sessionId: string, type: string, data: JsonObject): void {
-    appendFileSync(this.historyPath(sessionId), `${JSON.stringify({ at: this.iso(), type, data })}\n`, { mode: 0o600 });
+    const entry: SessionHistoryEntry = { at: this.iso(), type, data };
+    appendFileSync(this.historyPath(sessionId), `${JSON.stringify(entry)}\n`, { mode: 0o600 });
+    this.historyCache.get(sessionId)?.push(entry);
   }
   private readHistory(sessionId: string): SessionHistoryEntry[] {
+    const cached = this.historyCache.get(sessionId);
+    if (cached) return cached;
     const file = this.historyPath(sessionId);
-    if (!existsSync(file)) return [];
-    return readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean).flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } });
+    const entries: SessionHistoryEntry[] = !existsSync(file) ? [] : readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean).flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } });
+    this.historyCache.set(sessionId, entries);
+    return entries;
   }
 
-  private sanitize(value: unknown, key = ''): unknown {
-    if (/token|authorization|claimcode|credential/i.test(key)) return '[REDACTED]';
+  private collectSensitiveValues(value: unknown, key = '', found = new Set<string>()): Set<string> {
+    if (/token|authorization|claimcode|credential|connectorkey|secret|password|api[_-]?key|body|content/i.test(key)) {
+      if (typeof value === 'string' && value.length >= 4) found.add(value);
+      return found;
+    }
+    if (Array.isArray(value)) for (const item of value) this.collectSensitiveValues(item, '', found);
+    else if (value && typeof value === 'object') for (const [childKey, child] of Object.entries(value as JsonObject)) this.collectSensitiveValues(child, childKey, found);
+    return found;
+  }
+
+  private redactSensitiveText(value: string, sensitiveValues: Set<string>): string {
+    let redacted = value
+      .replace(/\bBearer\s+\S+/gi, 'Bearer [REDACTED]')
+      .replace(/(["']?(?:token|authorization|credential|claimCode|connectorKey|secret|password|api[_-]?key)["']?\s*[:=]\s*)(["']?)[^\s,}\]]+/gi, '$1$2[REDACTED]')
+      .replace(/([?&](?:token|key|secret|password|api[_-]?key)=)[^&\s]+/gi, '$1[REDACTED]');
+    for (const secret of sensitiveValues) redacted = redacted.split(secret).join('[REDACTED]');
+    return redacted;
+  }
+
+  private sanitize(value: unknown, key = '', sensitiveValues = new Set<string>()): unknown {
+    if (/token|authorization|claimcode|credential|connectorkey|secret|password|api[_-]?key/i.test(key)) return '[REDACTED]';
     if (/body|content/i.test(key)) return typeof value === 'string' ? `[REDACTED ${value.length} chars]` : '[REDACTED]';
-    if (Array.isArray(value)) return value.map((item) => this.sanitize(item));
-    if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value as JsonObject).map(([childKey, child]) => [childKey, this.sanitize(child, childKey)]));
+    if (typeof value === 'string') return this.redactSensitiveText(value, sensitiveValues);
+    if (Array.isArray(value)) return value.map((item) => this.sanitize(item, '', sensitiveValues));
+    if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value as JsonObject).map(([childKey, child]) => [childKey, this.sanitize(child, childKey, sensitiveValues)]));
     return value;
   }
 
@@ -672,7 +786,7 @@ export class LiteStore {
     const parsed = JSON.parse(readFileSync(this.statePath, 'utf8')) as StoredState | LegacyState;
     if (parsed.schemaVersion === 2) {
       if (!Array.isArray(parsed.sessions) || !Array.isArray(parsed.messages) || !Array.isArray(parsed.events) || !Array.isArray(parsed.subscriptions) || !Array.isArray(parsed.appBindings) || !Array.isArray(parsed.extensions)) throw new Error(`Invalid Lite state: ${this.statePath}`);
-      return parsed;
+      return this.replayJournal(parsed);
     }
     if (parsed.schemaVersion !== 1 || !Array.isArray(parsed.sessions) || !Array.isArray(parsed.messages) || !Array.isArray(parsed.extensions)) throw new Error(`Invalid Lite state: ${this.statePath}`);
     const phaseMap: Record<LegacySession['status'], SessionPhase> = { active: 'working', idle: 'waiting', blocked: 'blocked', completed: 'completed' };
@@ -701,6 +815,43 @@ export class LiteStore {
     const temporary = `${this.statePath}.tmp`;
     writeFileSync(temporary, `${JSON.stringify(this.state, null, 2)}\n`, { mode: 0o600 });
     renameSync(temporary, this.statePath);
+    try { rmSync(this.journalPath, { force: true }); } catch { /* the atomic snapshot is already durable */ }
+    this.journalEntries = 0;
+    this.journalBytes = 0;
+  }
+
+  private appendJournal(entry: StoreJournalInput): void {
+    this.state.revision += 1;
+    const encoded = `${JSON.stringify({ ...entry, revision: this.state.revision })}\n`;
+    appendFileSync(this.journalPath, encoded, { mode: 0o600 });
+    this.journalEntries += 1;
+    this.journalBytes += Buffer.byteLength(encoded);
+    if (this.journalEntries >= 1000 || this.journalBytes >= 4 * 1024 * 1024) this.save();
+  }
+
+  private replayJournal(state: StoredState): StoredState {
+    if (!existsSync(this.journalPath)) return state;
+    const messageIds = new Set(state.messages.map((message) => message.id));
+    const eventIds = new Set(state.events.map((event) => event.id));
+    const lines = readFileSync(this.journalPath, 'utf8').split(/\r?\n/).filter(Boolean);
+    for (const line of lines) {
+      let entry: StoreJournalEntry;
+      try { entry = JSON.parse(line) as StoreJournalEntry; } catch { continue; }
+      state.revision = Math.max(state.revision, Number(entry.revision) || 0);
+      if (entry.kind === 'message') {
+        if (!messageIds.has(entry.message.id)) { state.messages.push(entry.message); messageIds.add(entry.message.id); }
+        if (!eventIds.has(entry.event.id)) { state.events.push(entry.event); eventIds.add(entry.event.id); }
+        continue;
+      }
+      const session = state.sessions.find((item) => item.id === entry.sessionId);
+      if (!session) continue;
+      session.updatedAt = entry.updatedAt;
+      if (entry.checkpointStartedAt) session.checkpointStartedAt = entry.checkpointStartedAt;
+      if (session.controller && entry.lastActivityAt) session.controller.lastActivityAt = entry.lastActivityAt;
+    }
+    this.journalEntries = lines.length;
+    this.journalBytes = Buffer.byteLength(lines.join('\n'));
+    return state;
   }
 }
 

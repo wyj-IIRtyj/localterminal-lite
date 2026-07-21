@@ -2,7 +2,7 @@
 
 ## Status
 
-Resolved in the next release candidate.
+Resolved in v1.1.1.
 
 ## Severity
 
@@ -51,4 +51,4 @@ Tests verify that:
 
 ## Release requirement
 
-Type checking, build, the complete automated test suite, and UI state-model tests must pass before release.
+Satisfied for v1.1.1: type checking, build, the complete automated test suite, and UI state-model tests pass.

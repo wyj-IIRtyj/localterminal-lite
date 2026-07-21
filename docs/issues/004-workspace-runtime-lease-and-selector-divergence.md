@@ -2,7 +2,7 @@
 
 ## Status
 
-Resolved in the next release candidate.
+Resolved in v1.1.1.
 
 ## Severity
 
@@ -49,4 +49,4 @@ The same test builds startup and Settings selectors from the resulting registry 
 
 ## Release requirement
 
-Type checking, build, the complete automated test suite, repeated-switch integration coverage, and duplicate selector-construction review must pass before release.
+Satisfied for v1.1.1: type checking, build, the complete automated test suite, repeated-switch integration coverage, and duplicate selector-construction review pass.

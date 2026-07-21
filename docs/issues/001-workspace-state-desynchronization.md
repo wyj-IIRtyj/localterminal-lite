@@ -2,7 +2,7 @@
 
 ## Status
 
-Resolved in the next release candidate.
+Resolved in v1.1.1.
 
 ## Severity
 
@@ -38,4 +38,4 @@ The shared-port failover integration test now asserts that the leader is no long
 
 ## Release requirement
 
-The fix must pass type checking, build, the complete automated test suite, and shared-port failover testing before release.
+Satisfied for v1.1.1: type checking, build, the complete automated test suite, and shared-port failover testing pass.

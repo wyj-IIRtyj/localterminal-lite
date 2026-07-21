@@ -17,6 +17,10 @@ $BackupDir = $null
 $MigratingLegacy = $false
 $Committed = $false
 
+if ($Version -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+([._-][A-Za-z0-9.-]+)?$') { throw "Invalid LocalTerminal Lite version: $Version" }
+$InstallDir = [System.IO.Path]::GetFullPath($InstallDir)
+if ($InstallDir -eq [System.IO.Path]::GetPathRoot($InstallDir)) { throw "Refusing unsafe installation root: $InstallDir" }
+
 function Test-BinaryLayout {
   return (Test-Path (Join-Path $InstallDir "releases")) -and (Test-Path (Join-Path $InstallDir "current"))
 }
@@ -50,9 +54,9 @@ try {
   New-Item -ItemType Directory -Force -Path (Join-Path $InstallDir "releases") | Out-Null
   New-Item -ItemType Directory -Force -Path $LauncherDir | Out-Null
 
-  & curl.exe --fail --location --retry 5 --retry-all-errors --continue-at - --output $Archive $AssetUrl
+  & curl.exe --fail --location --connect-timeout 15 --max-time 1800 --retry 5 --retry-all-errors --continue-at - --output $Archive $AssetUrl
   if ($LASTEXITCODE -ne 0) { throw "Failed to download $Asset" }
-  & curl.exe --fail --location --retry 5 --retry-all-errors --output $ChecksumFile $ChecksumUrl
+  & curl.exe --fail --location --connect-timeout 15 --max-time 300 --retry 5 --retry-all-errors --output $ChecksumFile $ChecksumUrl
   if ($LASTEXITCODE -ne 0) { throw "Failed to download checksum for $Asset" }
   $Expected = ((Get-Content -Raw $ChecksumFile).Trim() -split '\s+')[0].ToLowerInvariant()
   $Actual = (Get-FileHash -Algorithm SHA256 $Archive).Hash.ToLowerInvariant()
@@ -64,6 +68,27 @@ try {
   Expand-Archive -Path $VerifiedArchive -DestinationPath $Expanded
   $Binary = Join-Path $Expanded "localterminal-lite.exe"
   if (-not (Test-Path $Binary)) { throw "Release asset does not contain localterminal-lite.exe" }
+  # Windows security scanners can transiently lock or interrupt a freshly expanded
+  # executable. Verify the exact candidate with bounded retries before committing it.
+  $CandidateVerified = $false
+  $ActualVersion = ""
+  $LastVerifyOutput = ""
+  for ($Attempt = 1; $Attempt -le 10; $Attempt++) {
+    $LastVerifyOutput = (& $Binary --verify-installation 2>&1 | Out-String).Trim()
+    $VerifyExit = $LASTEXITCODE
+    if ($VerifyExit -eq 0) {
+      $ActualVersion = (& $Binary --version 2>&1 | Out-String).Trim()
+      $VersionExit = $LASTEXITCODE
+      if ($VersionExit -eq 0 -and $ActualVersion -eq $Version.TrimStart('v')) {
+        $CandidateVerified = $true
+        break
+      }
+    }
+    Start-Sleep -Milliseconds ([Math]::Min(2000, 250 * $Attempt))
+  }
+  if (-not $CandidateVerified) {
+    throw "Release executable failed verification: expected $($Version.TrimStart('v')), found $ActualVersion. $LastVerifyOutput"
+  }
 
   $ReleaseDir = Join-Path (Join-Path $InstallDir "releases") $Version
   $ReleaseStaging = Join-Path (Join-Path $InstallDir "releases") (".$Version.staging.$PID")
@@ -72,6 +97,21 @@ try {
   Copy-Item -LiteralPath $Binary -Destination (Join-Path $ReleaseStaging "localterminal-lite.exe")
   Remove-Item -LiteralPath $ReleaseDir -Recurse -Force -ErrorAction SilentlyContinue
   Move-Item -LiteralPath $ReleaseStaging -Destination $ReleaseDir
+
+  # Copying the verified executable can trigger a second security scan. Do not
+  # publish the current pointer until the installed copy is executable too.
+  $InstalledBinary = Join-Path $ReleaseDir "localterminal-lite.exe"
+  $InstalledVerified = $false
+  for ($Attempt = 1; $Attempt -le 10; $Attempt++) {
+    $InstalledVersion = (& $InstalledBinary --version 2>&1 | Out-String).Trim()
+    $InstalledExit = $LASTEXITCODE
+    if ($InstalledExit -eq 0 -and $InstalledVersion -eq $Version.TrimStart('v')) {
+      $InstalledVerified = $true
+      break
+    }
+    Start-Sleep -Milliseconds ([Math]::Min(2000, 250 * $Attempt))
+  }
+  if (-not $InstalledVerified) { throw "Installed release failed verification: $InstalledVersion" }
 
   $CurrentTmp = Join-Path $InstallDir "current.tmp"
   $CurrentPath = Join-Path $InstallDir "current"

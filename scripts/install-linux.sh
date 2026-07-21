@@ -6,6 +6,9 @@ repository="wyj-IIRtyj/localterminal-lite"
 install_dir="${LOCALTERMINAL_LITE_HOME:-$HOME/LocalTerminal-Lite}"
 launcher_dir="${LOCALTERMINAL_LITE_BIN_DIR:-$HOME/.local/bin}"
 
+[[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([._-][A-Za-z0-9.-]+)?$ ]] || { echo "Invalid LocalTerminal Lite version: $version" >&2; exit 1; }
+[[ -n "$install_dir" && "$install_dir" != "/" ]] || { echo "Refusing unsafe installation root: $install_dir" >&2; exit 1; }
+
 case "$(uname -m)" in
   arm64|aarch64) platform="linux-arm64" ;;
   x86_64|amd64) platform="linux-x64" ;;
@@ -60,8 +63,10 @@ fi
 mkdir -p "$temporary_dir" "$download_dir" "$launcher_dir"
 asset_part="$download_dir/$asset.part"
 checksum_part="$download_dir/$asset.sha256.part"
-curl -fL --retry 5 --retry-all-errors --retry-delay 1 -C - "$asset_url" -o "$asset_part"
-curl -fL --retry 5 --retry-all-errors --retry-delay 1 "$checksum_url" -o "$checksum_part"
+curl_retry_all=()
+curl --help all 2>/dev/null | grep -q -- '--retry-all-errors' && curl_retry_all=(--retry-all-errors)
+curl -fL --connect-timeout 15 --max-time 1800 --retry 5 "${curl_retry_all[@]}" --retry-delay 1 -C - "$asset_url" -o "$asset_part"
+curl -fL --connect-timeout 15 --max-time 300 --retry 5 "${curl_retry_all[@]}" --retry-delay 1 "$checksum_url" -o "$checksum_part"
 cp "$asset_part" "$temporary_dir/$asset"
 cp "$checksum_part" "$temporary_dir/$asset.sha256"
 expected="$(awk '{print $1}' "$temporary_dir/$asset.sha256" | tr -d '\r\n')"
@@ -76,6 +81,9 @@ tar -xzf "$temporary_dir/$asset" -C "$temporary_dir"
 binary="$temporary_dir/localterminal-lite"
 [[ -f "$binary" ]] || { echo "Release asset does not contain localterminal-lite" >&2; exit 1; }
 chmod 755 "$binary"
+"$binary" --verify-installation >/dev/null
+actual_version="$("$binary" --version | tr -d '\r\n')"
+[[ "$actual_version" == "${version#v}" ]] || { echo "Release version mismatch: expected ${version#v}, found $actual_version" >&2; exit 1; }
 
 release_dir="$install_dir/releases/$version"
 release_staging="$install_dir/releases/.${version}.staging.$$"

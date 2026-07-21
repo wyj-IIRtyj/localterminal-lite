@@ -23,7 +23,7 @@ Configuration is stored in the user's operating-system configuration directory. 
 
 When a user connects ChatGPT through Actions or Apps, requested tool inputs and outputs travel between the user's Lite instance and OpenAI. When the user exposes Lite with a tunnel or reverse proxy, that provider also carries the traffic. Those services have their own terms and privacy practices.
 
-Lite masks connection credentials in the TUI by default, stores session-token hashes rather than raw session tokens, and redacts identity, authorization, claim-code, message-body, and content fields from audit argument snapshots. These controls reduce exposure but do not replace careful workspace selection or review.
+Lite masks connection credentials in the TUI by default, stores session-token hashes rather than raw session tokens, and redacts identity, authorization, claim-code, credential, secret, password, API-key, message-body, content, and sensitive URL-query fields from persisted call arguments and results. The Logs page otherwise keeps the complete sanitized input and output for local review. These controls reduce exposure but do not replace careful workspace selection or review.
 
 ## Retention and deletion
 

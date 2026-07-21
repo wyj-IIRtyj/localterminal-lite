@@ -2,7 +2,7 @@
 
 ## Status
 
-Resolved in the next release candidate.
+Resolved in v1.1.1.
 
 ## Severity
 
@@ -39,4 +39,4 @@ An automated test creates a plain temporary directory, refreshes and starts the 
 
 ## Release requirement
 
-The complete typecheck, build, automated test suite, and a direct non-Git runtime/TUI-controller smoke test must pass before release.
+Satisfied for v1.1.1: typecheck, build, the complete automated test suite, and the direct non-Git runtime/TUI-controller smoke test pass.

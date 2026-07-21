@@ -6,20 +6,41 @@ export type ConversationGroup = { id: string; sessionIds: [string, string]; mess
 export function logicalSessionGroups(sessions: LiteSession[]): LogicalSessionGroup[] {
   const byId = new Map(sessions.map((session) => [session.id, session]));
   const roots = sessions.filter((session) => !session.parentSessionId);
+  const originCache = new Map<string, string>();
   const originId = (session: LiteSession): string => {
-    const seen = new Set<string>(); let current = session;
-    while (current.continuesSessionId && !seen.has(current.id)) {
-      seen.add(current.id); const predecessor = byId.get(current.continuesSessionId);
+    const traversed: string[] = [];
+    const seen = new Set<string>();
+    let current = session;
+    let cached: string | undefined;
+    while (!seen.has(current.id)) {
+      cached = originCache.get(current.id);
+      if (cached) break;
+      seen.add(current.id);
+      traversed.push(current.id);
+      if (!current.continuesSessionId) break;
+      const predecessor = byId.get(current.continuesSessionId);
       if (!predecessor || predecessor.parentSessionId) break;
       current = predecessor;
     }
-    return current.id;
+    const origin = cached || current.id;
+    for (const id of traversed) originCache.set(id, origin);
+    return origin;
   };
+  const childrenByParent = new Map<string, LiteSession[]>();
+  for (const session of sessions) {
+    if (!session.parentSessionId) continue;
+    const children = childrenByParent.get(session.parentSessionId);
+    if (children) children.push(session); else childrenByParent.set(session.parentSessionId, [session]);
+  }
   const grouped = new Map<string, LiteSession[]>();
-  for (const session of roots) { const origin = originId(session); grouped.set(origin, [...(grouped.get(origin) || []), session]); }
+  for (const session of roots) {
+    const origin = originId(session);
+    const chain = grouped.get(origin);
+    if (chain) chain.push(session); else grouped.set(origin, [session]);
+  }
   return [...grouped.entries()].map(([id, chain]) => {
-    const ordered = chain.sort((a, b) => a.createdAt.localeCompare(b.createdAt)); const memberIds = new Set(ordered.map((item) => item.id));
-    const children = sessions.filter((session) => session.parentSessionId && memberIds.has(session.parentSessionId)).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    const ordered = chain.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    const children = ordered.flatMap((item) => childrenByParent.get(item.id) || []).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
     return { id, title: ordered[0]?.name || id, sessions: ordered, children, current: ordered.at(-1)! };
   }).sort((a, b) => b.current.updatedAt.localeCompare(a.current.updatedAt));
 }
@@ -28,7 +49,8 @@ export function conversationGroups(messages: LiteMessage[]): ConversationGroup[]
   const groups = new Map<string, LiteMessage[]>();
   for (const message of messages) {
     const pair = [message.from, message.to].sort() as [string, string]; const id = pair.join('::');
-    groups.set(id, [...(groups.get(id) || []), message]);
+    const group = groups.get(id);
+    if (group) group.push(message); else groups.set(id, [message]);
   }
   return [...groups.entries()].map(([id, items]) => {
     const ordered = items.sort((a, b) => a.createdAt.localeCompare(b.createdAt));

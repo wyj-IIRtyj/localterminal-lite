@@ -33,7 +33,7 @@ export function App({ controller, onExit }: { controller: TuiController; onExit:
   const [detail, setDetail] = useState<Detail>();
   const [revealCredentials, setRevealCredentials] = useState(false);
   const credentialRevealDeadline = useRef(0);
-  const [showAudit, setShowAudit] = useState(false);
+  const [showAudit, setShowAudit] = useState(true);
   const [logPage, setLogPage] = useState(0);
   const [logAnchorAt, setLogAnchorAt] = useState<string>();
   const [form, setForm] = useState<FormState>();
@@ -204,8 +204,9 @@ export function App({ controller, onExit }: { controller: TuiController; onExit:
       }
     }
     const eligible = !form && !detail && [0, 5].includes(tab);
-    if (event.eventType === 'release') credentialRevealDeadline.current = 0;
-    else if (eligible && event.name?.toLowerCase() === 'v') credentialRevealDeadline.current = performance.now() + 350;
+    if (eligible && event.eventType !== 'release' && event.name?.toLowerCase() === 'v') {
+      credentialRevealDeadline.current = performance.now() + 450;
+    }
     setRevealCredentials((current) => nextCredentialVisibility(
       current,
       { name: event.name, eventType: event.eventType },

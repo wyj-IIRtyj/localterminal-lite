@@ -34,6 +34,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubus
 
 Remote scripts are convenient but security-sensitive. You can inspect [install-macos.sh](scripts/install-macos.sh), [install-linux.sh](scripts/install-linux.sh), or [install-windows.ps1](scripts/install-windows.ps1) before running them.
 
+For local release candidates, offline assets, or step-by-step checksum verification, use the bilingual [manual installation guide](docs/MANUAL_INSTALL.md).
+
 The first-run TUI configures everything: language, theme, authorized workspace, bind address, public URL, limits, Apps connector key, and Actions token. No `.env` or manual configuration-file editing is required.
 
 ### Start it again later
@@ -111,8 +113,8 @@ The seven full-window pages are Overview, Sessions, Messages, Diff, Extensions, 
 - Continuations remain inside one logical session card; delegated children appear as indented directory-style nodes with phase and presence colors.
 - Enter opens complete session history or a two-way message conversation.
 - Diff shows staged, unstaged, and untracked workspace changes.
-- Logs can include sanitized factual tool calls from every session.
-- All settings and credential rotation stay inside the TUI. Finite choices use keyboard/mouse selectors; free-text fields replace prefilled content on first typing and support `Ctrl+U` to clear. Hold `V` to reveal credentials and release it to hide them.
+- Logs show Apps and Actions calls through one lifecycle model. A call appears immediately with source, tool name, sanitized complete arguments, start time, and `running`; the same logical record is then completed with the sanitized complete result, duration, and `completed`, `failed`, or `timeout`.
+- All settings and credential rotation stay inside the TUI. Finite choices use keyboard/mouse selectors; free-text fields replace prefilled content on first typing and support `Ctrl+U` to clear. Hold `V` to reveal credentials; after key repeats stop, they hide within the 450ms fail-closed deadline. Navigation or opening a form hides them immediately.
 
 Input is routed in one order: modal → focused form control → current page → global shortcuts. OpenTUI owns alternate-screen lifecycle, mouse decoding, layout, wrapping, incremental drawing, and terminal restoration.
 
@@ -122,7 +124,7 @@ Lite is local-first and has no project telemetry. The selected workspace is a re
 
 - Connection credentials live in the operating-system user configuration directory.
 - Only session-token hashes are persisted.
-- Identity, authorization, claim-code, message-body, and content fields are redacted from audit argument snapshots.
+- Identity, authorization, claim-code, credential, secret, password, API-key, message-body, content, and sensitive URL-query fields are redacted from persisted argument and result snapshots.
 - Only the TUI owner can permanently delete sessions and history.
 
 Read the [privacy notice and deployment template](docs/PRIVACY.md). Public GPTs with Actions need a privacy policy that accurately covers the publisher's own endpoint and data flow.
@@ -137,6 +139,8 @@ Report vulnerabilities through the private process in [SECURITY.md](SECURITY.md)
 | Recommended GPT preset instructions | [Open](docs/GPT_INSTRUCTIONS.md) | [打开](docs/GPT_INSTRUCTIONS.zh-CN.md) |
 | Short scenario prompts | [Open](docs/PROMPT_PLAYBOOK.md) | [打开](docs/PROMPT_PLAYBOOK.zh-CN.md) |
 | Privacy and deployment template | [Open](docs/PRIVACY.md) | [打开](docs/PRIVACY.zh-CN.md) |
+| Manual/offline installation | [Open](docs/MANUAL_INSTALL.md) | [打开](docs/MANUAL_INSTALL.md#中文说明) |
+| Architecture and ownership | [Open](docs/architecture.md) | — |
 
 ## Development and verification
 

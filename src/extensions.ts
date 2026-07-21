@@ -1,8 +1,9 @@
+import { randomUUID } from 'node:crypto';
 import type { LiteConfig } from './types.js';
 import { LiteError, type LiteStore } from './store.js';
 import { renderTemplate, resolveWorkspacePath, validateJsonSchema } from './security.js';
 import { runCommand } from './core-tools.js';
-import type { CustomExtensionSpec, InvocationContext, JsonObject, SessionIdentity, ToolDefinition, ToolResponse } from './types.js';
+import type { CustomExtensionSpec, InvocationContext, JsonObject, SessionIdentity, ToolAuditEvent, ToolDefinition, ToolResponse } from './types.js';
 
 const EXTENSION_NAME = /^[a-z][a-z0-9_]{2,63}$/;
 const RESERVED_NAMES = new Set(['extension_discover', 'extension_register', 'extension_call']);
@@ -51,6 +52,18 @@ function failure(error: unknown): ToolResponse {
   return { ok: false, error: { code, message, retryable: false } };
 }
 
+function resultTimedOut(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as JsonObject;
+  const commandResult = record.timedOut === true
+    && typeof record.command === 'string'
+    && typeof record.cwd === 'string'
+    && Object.prototype.hasOwnProperty.call(record, 'exitCode')
+    && typeof record.durationMs === 'number';
+  if (commandResult) return true;
+  return typeof record.target === 'string' && resultTimedOut(record.result);
+}
+
 function explicitIdentity(input: JsonObject): SessionIdentity | undefined {
   if (input.identity === undefined) return undefined;
   const identity = objectValue(input.identity, 'identity');
@@ -59,9 +72,75 @@ function explicitIdentity(input: JsonObject): SessionIdentity | undefined {
 }
 
 export class ExtensionService {
-  constructor(private readonly config: LiteConfig, private readonly store: LiteStore, private readonly builtins: Map<string, ToolDefinition>) {}
+  private readonly activeActions = new Map<string, { sessionId: string; action: string; source: InvocationContext['transport']; args: JsonObject; startedAt: number }>();
+  private readonly closedActionIds = new Set<string>();
+
+  constructor(
+    private readonly config: LiteConfig,
+    private readonly store: LiteStore,
+    private readonly builtins: Map<string, ToolDefinition>,
+    private readonly onAudit?: (event: ToolAuditEvent) => void,
+  ) {}
+
+  activeActionCount(): number { return this.activeActions.size; }
+
+  pendingActions(): Array<{ id: string; sessionId: string; action: string; startedAt: string }> {
+    return [...this.activeActions.entries()].map(([id, action]) => ({
+      id, sessionId: action.sessionId, action: action.action, startedAt: new Date(action.startedAt).toISOString(),
+    }));
+  }
+
+  expirePendingActions(maxAgeMs: number, reason = 'Pending action expired during runtime recovery.'): number {
+    const now = Date.now();
+    let cleared = 0;
+    for (const [id, action] of this.activeActions) {
+      if (now - action.startedAt < maxAgeMs) continue;
+      const error = { code: 'PENDING_ACTION_CLEARED', message: reason };
+      this.finishAudit(action.sessionId, id, action.source, action.action, action.args, action.startedAt, 'failed', { ok: false, error }, error);
+      cleared += 1;
+    }
+    return cleared;
+  }
+
+  private beginAudit(sessionId: string, actionId: string, source: InvocationContext['transport'], action: string, args: JsonObject, started: number): void {
+    this.activeActions.set(actionId, { sessionId, action, source, args: structuredClone(args), startedAt: started });
+    const event: ToolAuditEvent = {
+      id: actionId, timestamp: new Date(started).toISOString(), source, action, status: 'running', durationMs: 0,
+      workspace: this.config.workspaceDir, session: sessionId, args,
+    };
+    const persisted = this.store.auditEvent(sessionId, event);
+    this.onAudit?.(persisted);
+  }
+
+  private finishAudit(
+    sessionId: string,
+    actionId: string,
+    source: InvocationContext['transport'],
+    action: string,
+    args: JsonObject,
+    started: number,
+    status: Exclude<ToolAuditEvent['status'], 'running'>,
+    result: unknown,
+    error?: { code: string; message?: string },
+  ): void {
+    if (this.closedActionIds.has(actionId)) return;
+    const completedAt = new Date().toISOString();
+    const event: ToolAuditEvent = {
+      id: actionId, timestamp: new Date(started).toISOString(), completedAt, source, action, status, durationMs: Date.now() - started, error,
+      workspace: this.config.workspaceDir, session: sessionId, args, result,
+    };
+    const persisted = this.store.auditEvent(sessionId, event);
+    this.onAudit?.(persisted);
+    this.activeActions.delete(actionId);
+    this.closedActionIds.add(actionId);
+    if (this.closedActionIds.size > 2000) this.closedActionIds.delete(this.closedActionIds.values().next().value!);
+  }
 
   async discover(input: JsonObject = {}, context: InvocationContext = { transport: 'test' }): Promise<ToolResponse> {
+    let sessionId: string | undefined;
+    const started = Date.now();
+    const actionId = `act_${randomUUID()}`;
+    let auditStarted = false;
     try {
       const authenticated = this.authenticate(input, context, true);
       if (!authenticated) {
@@ -77,7 +156,10 @@ export class ExtensionService {
           bootstrapTools: ['extension_discover()', 'session_register(mode=root,workspaceId)', 'session_inherit(sessionId,claimCode)', 'session_inherit(sessionId,sessionToken=<previous token>)'],
         } };
       }
+      sessionId = authenticated.id;
       this.store.touchControl(authenticated.id);
+      this.beginAudit(authenticated.id, actionId, context.transport, 'extension_discover', input, started);
+      auditStarted = true;
       const query = typeof input.query === 'string' ? input.query.toLowerCase() : '';
       const includeSchemas = input.includeSchemas !== false;
       const builtins = [...this.builtins.values()].map((tool) => ({ name: tool.name, title: tool.title, description: tool.description, kind: 'builtin', annotations: tool.annotations, ...(includeSchemas ? { inputSchema: tool.inputSchema } : {}) }));
@@ -104,16 +186,29 @@ export class ExtensionService {
         },
         query: query ? { value: query, matched: matches.length, usedFullCatalogFallback: matches.length === 0 } : undefined,
       } };
-      return this.attachEvents(response, authenticated.id);
-    } catch (error) { return failure(error); }
+      const completed = this.attachEvents(response, authenticated.id);
+      this.finishAudit(authenticated.id, actionId, context.transport, 'extension_discover', input, started, 'completed', completed);
+      return completed;
+    } catch (error) {
+      const auditError = { code: error instanceof LiteError ? error.code : 'EXTENSION_ERROR', message: error instanceof Error ? error.message : String(error) };
+      const response = this.attachEvents(failure(error), sessionId);
+      if (sessionId && auditStarted) this.finishAudit(sessionId, actionId, context.transport, 'extension_discover', input, started, 'failed', response, auditError);
+      return response;
+    } finally {
+      this.activeActions.delete(actionId);
+    }
   }
 
   async register(input: JsonObject, context: InvocationContext = { transport: 'test' }): Promise<ToolResponse> {
     let sessionId: string | undefined;
     const started = Date.now();
+    const actionId = `act_${randomUUID()}`;
+    let auditStarted = false;
     try {
       const authenticated = this.authenticate(input, context, false)!; sessionId = authenticated.id;
       this.store.beforeOrdinaryCall(sessionId);
+      this.beginAudit(sessionId, actionId, context.transport, 'extension_register', input, started);
+      auditStarted = true;
       const action = typeof input.action === 'string' ? input.action : '';
       let data: JsonObject;
       if (action === 'remove') {
@@ -126,11 +221,16 @@ export class ExtensionService {
         if (action === 'upsert') this.store.upsertExtension(spec);
         data = { action, valid: true, registered: action === 'upsert', spec };
       }
-      this.store.audit(sessionId, { tool: 'extension_register', startedAt: new Date(started).toISOString(), durationMs: Date.now() - started, ok: true, args: input });
-      return this.attachEvents({ ok: true, data }, sessionId);
+      const response = this.attachEvents({ ok: true, data }, sessionId);
+      this.finishAudit(sessionId, actionId, context.transport, 'extension_register', input, started, 'completed', response);
+      return response;
     } catch (error) {
-      if (sessionId) this.store.audit(sessionId, { tool: 'extension_register', startedAt: new Date(started).toISOString(), durationMs: Date.now() - started, ok: false, errorCode: error instanceof LiteError ? error.code : 'EXTENSION_ERROR', args: input });
-      return this.attachEvents(failure(error), sessionId);
+      const auditError = { code: error instanceof LiteError ? error.code : 'EXTENSION_ERROR', message: error instanceof Error ? error.message : String(error) };
+      const response = this.attachEvents(failure(error), sessionId);
+      if (sessionId && auditStarted) this.finishAudit(sessionId, actionId, context.transport, 'extension_register', input, started, 'failed', response, auditError);
+      return response;
+    } finally {
+      this.activeActions.delete(actionId);
     }
   }
 
@@ -153,9 +253,13 @@ export class ExtensionService {
   async call(input: JsonObject, context: InvocationContext): Promise<ToolResponse> {
     let sessionId: string | undefined;
     const started = Date.now();
+    const actionId = `act_${randomUUID()}`;
+    const action = typeof input.tool === 'string' ? input.tool : 'extension_call';
+    let args: JsonObject = {};
+    let auditStarted = false;
     try {
       if (typeof input.tool !== 'string') throw new LiteError('INVALID_INPUT', 'tool is required.');
-      const args = callArguments(input);
+      args = callArguments(input);
       const bootstrapRoot = input.tool === 'session_register' && args.mode !== 'delegate';
       const bootstrapInherit = input.tool === 'session_inherit';
       const authenticated = bootstrapRoot || bootstrapInherit ? undefined : this.authenticate(input, context, false)!;
@@ -163,14 +267,31 @@ export class ExtensionService {
       const invocationContext: InvocationContext = { ...context, identity: explicitIdentity(input), authenticatedSession: authenticated };
       if (authenticated) {
         if (!CONTROL_TOOLS.has(input.tool)) this.store.beforeOrdinaryCall(authenticated.id); else this.store.touchControl(authenticated.id);
+        this.beginAudit(authenticated.id, actionId, context.transport, input.tool, args, started);
+        auditStarted = true;
       }
       const result = await this.invokeTool(input.tool, args, invocationContext);
       if (!sessionId && result.identity && typeof result.identity === 'object') sessionId = String((result.identity as JsonObject).sessionId || '');
-      if (sessionId) this.store.audit(sessionId, { tool: input.tool, startedAt: new Date(started).toISOString(), durationMs: Date.now() - started, ok: true, args });
+      if (sessionId && !auditStarted) {
+        this.beginAudit(sessionId, actionId, context.transport, input.tool, args, started);
+        auditStarted = true;
+      }
+      if (sessionId) {
+        const response = this.attachEvents({ ok: true, data: { tool: input.tool, result } }, sessionId);
+        if (resultTimedOut(result)) {
+          const auditError = { code: 'ACTION_TIMEOUT', message: 'The action exceeded its configured timeout.' };
+          this.finishAudit(sessionId, actionId, context.transport, input.tool, args, started, 'timeout', response, auditError);
+        } else this.finishAudit(sessionId, actionId, context.transport, input.tool, args, started, 'completed', response);
+        return response;
+      }
       return this.attachEvents({ ok: true, data: { tool: input.tool, result } }, sessionId);
     } catch (error) {
-      if (sessionId) this.store.audit(sessionId, { tool: typeof input.tool === 'string' ? input.tool : 'extension_call', startedAt: new Date(started).toISOString(), durationMs: Date.now() - started, ok: false, errorCode: error instanceof LiteError ? error.code : 'EXTENSION_ERROR', args: input });
-      return this.attachEvents(failure(error), sessionId);
+      const auditError = { code: error instanceof LiteError ? error.code : 'EXTENSION_ERROR', message: error instanceof Error ? error.message : String(error) };
+      const response = this.attachEvents(failure(error), sessionId);
+      if (sessionId && auditStarted) this.finishAudit(sessionId, actionId, context.transport, action, args, started, 'failed', response, auditError);
+      return response;
+    } finally {
+      this.activeActions.delete(actionId);
     }
   }
 

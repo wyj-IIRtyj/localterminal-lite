@@ -34,6 +34,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubus
 
 直接运行远端脚本很方便，但也需要谨慎。执行前可以先检查 [macOS 安装脚本](scripts/install-macos.sh)、[Linux 安装脚本](scripts/install-linux.sh)或 [Windows 安装脚本](scripts/install-windows.ps1)。
 
+如需安装本地候选包、使用离线资产或逐步核对校验值，请阅读双语[手动安装说明](docs/MANUAL_INSTALL.md)。
+
 首次启动的 TUI 会完成全部配置：语言、主题、授权工作区、监听地址、公网 URL、限制、Apps connector key 和 Actions token。不需要 `.env`，也不需要手动修改配置文件。
 
 ### 第二次及以后快速启动
@@ -111,8 +113,8 @@ Lite session 是工作上下文，不是 ChatGPT 对话 ID。
 - Continuation 保留在一个逻辑 session 卡片内；委派子项像目录一样缩进，并保留 phase/presence 颜色。
 - Enter 可打开完整 session 历史或双向消息对话。
 - Diff 展示 staged、unstaged 和 untracked 工作区变化。
-- Logs 可以显示所有 session 的脱敏事实工具调用。
-- 所有设置和凭据轮换都在 TUI 内完成。有限选项使用键盘/鼠标选择器；自由文本在首次输入时替换预填值，并支持 `Ctrl+U` 一键清空。按住 `V` 显示凭证，松开后自动隐藏。
+- Logs 使用统一生命周期展示 Apps 与 Actions 调用。调用发起后立即显示来源、工具名、脱敏后的完整参数、开始时间和 `running`；返回后在同一条逻辑记录中补充脱敏后的完整结果、耗时以及 `completed`、`failed` 或 `timeout`。
+- 所有设置和凭据轮换都在 TUI 内完成。有限选项使用键盘/鼠标选择器；自由文本在首次输入时替换预填值，并支持 `Ctrl+U` 一键清空。按住 `V` 显示凭证；停止按键重复后会在 450ms 的 fail-closed 截止时间内隐藏，切换页面或打开表单会立即隐藏。
 
 输入优先级固定为：模态框 → 当前表单控件 → 当前页面 → 全局快捷键。OpenTUI 负责 alternate screen 生命周期、鼠标解析、布局、换行、增量绘制和终端恢复。
 
@@ -122,7 +124,7 @@ Lite 以本地运行为主，没有项目遥测。所选工作区是真实的读
 
 - 连接凭据保存在操作系统用户配置目录；
 - 只持久化 session token 的哈希；
-- 审计参数会清除 identity、authorization、claim code、消息正文和 content；
+- 持久化的调用参数与返回结果会清除 identity、authorization、claim code、credential、secret、password、API key、消息正文、content 和 URL 中的敏感查询参数；
 - 只有 TUI 用户能够永久删除 session 与历史。
 
 请阅读[隐私说明与部署模板](docs/PRIVACY.zh-CN.md)。发布带 Actions 的公开 GPT 时，隐私政策必须准确覆盖发布者自己的 endpoint 和数据流。
@@ -137,6 +139,8 @@ Lite 以本地运行为主，没有项目遥测。所选工作区是真实的读
 | 推荐 GPT 预设指令 | [打开](docs/GPT_INSTRUCTIONS.zh-CN.md) | [Open](docs/GPT_INSTRUCTIONS.md) |
 | 特定场景短提示词 | [打开](docs/PROMPT_PLAYBOOK.zh-CN.md) | [Open](docs/PROMPT_PLAYBOOK.md) |
 | 隐私与部署模板 | [打开](docs/PRIVACY.zh-CN.md) | [Open](docs/PRIVACY.md) |
+| 手动/离线安装 | [打开](docs/MANUAL_INSTALL.md#中文说明) | [Open](docs/MANUAL_INSTALL.md) |
+| 架构与资源归属 | — | [Open](docs/architecture.md) |
 
 ## 开发与验证
 

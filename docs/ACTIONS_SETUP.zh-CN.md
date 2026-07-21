@@ -2,7 +2,7 @@
 
 [English](ACTIONS_SETUP.md) · [推荐 GPT 预设指令](GPT_INSTRUCTIONS.zh-CN.md) · [短提示词手册](PROMPT_PLAYBOOK.zh-CN.md) · [隐私说明](PRIVACY.zh-CN.md)
 
-本教程从一台没有开发环境的新电脑开始，直到完成一个可测试的私有 GPT。教程基于 LocalTerminal Lite 1.0.1 和 ChatGPT 网页编辑器。OpenAI 当前只允许符合条件的付费用户或受管工作区用户在网页端创建/编辑 GPT；一个 GPT 只能选择 **Apps 或 Actions，不能同时使用两者**。参见 OpenAI 的 [GPT 创建说明](https://help.openai.com/en/articles/8554397-creating-a-gpt)和 [Actions 配置说明](https://help.openai.com/en/articles/9442513)。
+本教程从一台没有开发环境的新电脑开始，直到完成一个可测试的私有 GPT。教程基于 LocalTerminal Lite 1.1.1 和 ChatGPT 网页编辑器。OpenAI 当前向付费用户提供 GPT 创建功能，具体还受工作区角色、策略和 Actions 域名限制。一个 GPT 只能选择 **Apps 或 Actions，不能同时使用两者**。使用 ChatGPT 的 Pro mode 时不能使用 Actions，因此 Actions GPT 的编辑器会提供兼容的非 Pro 模型。参见 OpenAI 的 [GPT 创建说明](https://help.openai.com/en/articles/8554397-creating-a-gpt)和 [Actions 配置说明](https://help.openai.com/en/articles/9442513)。
 
 > ChatGPT 截图来自本地 HTML 存档的隐私安全裁剪，只保留通用配置界面；不含聊天正文、账户身份、真实地址或真实凭据。ChatGPT 的具体标签以后可能调整。
 
@@ -26,16 +26,22 @@ flowchart LR
 ### macOS
 
 ```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.0.1/scripts/install-macos.sh)"
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.1.1/scripts/install-macos.sh)"
+```
+
+### Linux
+
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.1.1/scripts/install-linux.sh)"
 ```
 
 ### Windows PowerShell
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.0.1/scripts/install-windows.ps1 | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.1.1/scripts/install-windows.ps1 | iex"
 ```
 
-安装脚本会在需要时安装 Bun、在不依赖 Git 的情况下下载固定版本源码、安装锁定依赖、把 `localterminal-lite` 注册到当前用户的 PATH，然后打开 TUI。如果组织不允许直接运行远端脚本，请先打开仓库中的脚本检查内容。第二次及以后只需重新打开终端并输入：
+安装脚本会下载与当前平台匹配的独立可执行文件和 SHA-256 文件，完成校验后写入版本化 release 目录，把 `localterminal-lite` 注册到当前用户的 PATH，然后打开 TUI。它不会安装 Git、Node.js、Bun 或包依赖。如果组织不允许直接运行远端脚本，请先打开仓库中的脚本检查内容。第二次及以后只需重新打开终端并输入：
 
 ```text
 localterminal-lite
@@ -188,6 +194,8 @@ https://random-words.trycloudflare.com/openapi.json
 5. `workspace_info` 通过带顶层 `identity` 的 `extensionCall` 执行；
 6. 回复结束前，`session_checkpoint` 写入 summary 和 `waiting` phase。
 
+Lite 日志页会把每次调用显示为一条持续更新的记录：来源（`ACTIONS`）、工具名、脱敏后的完整参数、`running` 状态和开始时间；返回后在同一记录中显示脱敏后的完整结果、耗时以及 `completed`、`failed` 或 `timeout` 状态。
+
 继续测试协作：
 
 ```text
@@ -207,7 +215,7 @@ https://random-words.trycloudflare.com/openapi.json
 | 现象 | 处理方法 |
 | --- | --- |
 | `Input should be '3.1.1' or '3.1.0'` | 更新 Lite，导入准确的 `/openapi.json` URL，并删除旧的手工 schema。 |
-| `components.schemas ... is not an object` | 使用了旧版或被修改的 schema。Lite 1.0.1 返回具体对象；从运行中的服务重新导入。 |
+| `components.schemas ... is not an object` | 使用了旧版或被修改的 schema。Lite 1.1.1 返回具体对象；从运行中的服务重新导入。 |
 | `spec must be an object` | `extensionRegister` 需要顶层 `spec:{...}`。创建 session 应使用 `extensionCall` + `tool:"session_register"`。 |
 | `input.name is required`、`input.to is required` 或 `input.body is required` | 把参数放入 `extensionCall.input`，例如 `{tool:"message_send", input:{to:"reviewer", body:"Ready"}, identity:{...}}`。 |
 | `IDENTITY_REQUIRED` | 创建 root 或领取交接 session，然后在每个认证调用中携带返回的 identity。 |

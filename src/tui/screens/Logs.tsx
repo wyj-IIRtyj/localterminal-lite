@@ -1,6 +1,7 @@
 import path from 'node:path';
 import type { LiteRuntime, RuntimeLog } from '../../server.js';
 import { readWorkspaceLogs, workspaceId } from '../../instances.js';
+import type { ToolAuditEvent } from '../../types.js';
 import type { Theme } from '../state.js';
 import { Heading } from './shared.js';
 
@@ -13,6 +14,7 @@ type DisplayEntry = {
   workspace?: string;
   detail: string;
   duration?: number;
+  audit?: ToolAuditEvent;
 };
 
 function timeOf(at: string): string {
@@ -21,6 +23,7 @@ function timeOf(at: string): string {
 }
 
 function runtimeOperation(message: string): string {
+  if (/control channel/i.test(message)) return 'CONTROL';
   if (/listening/i.test(message)) return 'SERVER';
   if (/settings|configured|restored/i.test(message)) return 'CONFIG';
   if (/session/i.test(message)) return 'SESSION';
@@ -44,13 +47,45 @@ function RuntimeRow({ entry, theme }: { entry: DisplayEntry; theme: Theme }) {
   );
 }
 
+function json(value: unknown): string {
+  if (value === undefined) return '—';
+  try { return JSON.stringify(value); } catch { return String(value); }
+}
+
+function AuditRow({ entry, theme, zh }: { entry: DisplayEntry; theme: Theme; zh: boolean }) {
+  const audit = entry.audit!;
+  const statusColor = audit.status === 'completed' ? theme.good : audit.status === 'running' ? theme.accent : theme.bad;
+  return (
+    <box flexDirection="column" width="100%" marginBottom={1}>
+      <box flexDirection="row" gap={1} width="100%" flexWrap="wrap">
+        <text fg={theme.muted}>{timeOf(audit.timestamp)}</text>
+        <text fg={statusColor}><b>{audit.status.toUpperCase().padEnd(9)}</b></text>
+        <text fg={theme.warn}><b>{audit.source.toUpperCase()}</b></text>
+        {entry.workspace ? <text fg={theme.muted}>[{entry.workspace}]</text> : null}
+        <text fg={theme.text}><b>{audit.action}</b></text>
+        {entry.subject ? <text fg={theme.accent}>{entry.subject}</text> : null}
+        {audit.status !== 'running' ? <text fg={theme.muted}>{audit.durationMs}ms</text> : null}
+        {audit.error?.code ? <text fg={theme.bad}>{audit.error.code}</text> : null}
+      </box>
+      <box flexDirection="row" gap={1} paddingLeft={2} width="100%">
+        <text fg={theme.muted}>{zh ? '参数' : 'ARGS'}</text>
+        <text fg={theme.text} wrapMode="word" flexGrow={1}>{json(audit.args)}</text>
+      </box>
+      <box flexDirection="row" gap={1} paddingLeft={2} width="100%">
+        <text fg={theme.muted}>{zh ? '返回' : 'RESULT'}</text>
+        <text fg={audit.status === 'failed' || audit.status === 'timeout' ? theme.bad : theme.text} wrapMode="word" flexGrow={1}>{json(audit.result)}</text>
+      </box>
+    </box>
+  );
+}
+
 const PAGE_SIZE = 100;
 
 export function Logs({ runtime, logs, theme, zh, showAudit, page, anchorAt }: { runtime: LiteRuntime; logs: RuntimeLog[]; theme: Theme; zh: boolean; showAudit: boolean; page: number; anchorAt?: string }) {
   const anchoredLogs = anchorAt ? logs.filter((entry) => entry.at <= anchorAt) : logs;
   const localEnd = Math.max(0, anchoredLogs.length - page * PAGE_SIZE);
   const localStart = Math.max(0, localEnd - PAGE_SIZE);
-  const entries: DisplayEntry[] = anchoredLogs.slice(localStart, localEnd).map((entry) => ({
+  const entries: DisplayEntry[] = anchoredLogs.slice(localStart, localEnd).filter((entry) => !entry.audit).map((entry) => ({
     at: entry.at,
     kind: 'runtime',
     level: entry.level,
@@ -58,6 +93,7 @@ export function Logs({ runtime, logs, theme, zh, showAudit, page, anchorAt }: { 
     detail: entry.message,
   }));
   const currentWorkspaceId = workspaceId(runtime.config.workspaceDir);
+  const remoteAudits = new Map<string, { audit: ToolAuditEvent; workspace: string }>();
   try {
     for (const group of readWorkspaceLogs(path.dirname(runtime.config.settingsPath), PAGE_SIZE, page * PAGE_SIZE, anchorAt)) {
       if (group.workspace.id === currentWorkspaceId) continue;
@@ -66,20 +102,39 @@ export function Logs({ runtime, logs, theme, zh, showAudit, page, anchorAt }: { 
       for (const raw of group.entries) {
         const entry = raw as RuntimeLog;
         if (!entry?.at || !entry?.message) continue;
+        if (entry.audit?.id) {
+          remoteAudits.set(`${group.workspace.id}:${entry.audit.id}`, { audit: entry.audit, workspace: label });
+          continue;
+        }
         entries.push({ at: entry.at, kind: 'runtime', level: entry.level || 'info', operation: runtimeOperation(entry.message), workspace: label, detail: entry.message });
       }
     }
   } catch { /* cross-workspace logs are best effort */ }
   if (showAudit) {
-    const audit = runtime.store.auditFacts(PAGE_SIZE * (page + 1) + 5000).filter((fact) => !anchorAt || fact.at <= anchorAt);
-    for (const fact of audit.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE)) entries.push({
-    at: fact.at,
-    kind: 'audit',
-    level: fact.ok ? 'ok' : 'error',
-    operation: fact.tool,
-    subject: fact.sessionName,
-    detail: fact.ok ? JSON.stringify(fact.args) : `${fact.errorCode || 'ERROR'} · ${JSON.stringify(fact.args)}`,
-      duration: fact.durationMs,
+    const audit = runtime.store.auditFacts(5000).filter((fact) => !anchorAt || fact.at <= anchorAt);
+    const auditEnd = Math.max(0, audit.length - page * PAGE_SIZE);
+    const auditStart = Math.max(0, auditEnd - PAGE_SIZE);
+    for (const fact of audit.slice(auditStart, auditEnd)) entries.push({
+      at: fact.at,
+      kind: 'audit',
+      level: fact.status === 'running' ? 'info' : fact.status === 'completed' ? 'ok' : 'error',
+      operation: fact.action,
+      subject: fact.sessionName,
+      workspace: fact.workspace ? path.basename(fact.workspace) : undefined,
+      detail: '',
+      duration: fact.status === 'running' ? undefined : fact.durationMs,
+      audit: fact,
+    });
+    for (const { audit: remote, workspace } of remoteAudits.values()) entries.push({
+      at: remote.timestamp,
+      kind: 'audit',
+      level: remote.status === 'running' ? 'info' : remote.status === 'completed' ? 'ok' : 'error',
+      operation: remote.action,
+      subject: remote.session,
+      workspace,
+      detail: '',
+      duration: remote.status === 'running' ? undefined : remote.durationMs,
+      audit: remote,
     });
   }
   entries.sort((a, b) => b.at.localeCompare(a.at));
@@ -96,7 +151,9 @@ export function Logs({ runtime, logs, theme, zh, showAudit, page, anchorAt }: { 
         <text fg={theme.muted}>{zh ? '状态' : 'STAT'}</text>
         <text fg={theme.muted}>{zh ? '操作 / 会话 / 内容' : 'OPERATION / SESSION / DETAIL'}</text>
       </box>
-      {visibleEntries.length ? visibleEntries.map((entry, index) => <RuntimeRow key={`${entry.at}-${entry.kind}-${index}`} entry={entry} theme={theme} />)
+      {visibleEntries.length ? visibleEntries.map((entry, index) => entry.audit
+        ? <AuditRow key={`${entry.audit.id}-${entry.workspace || ''}`} entry={entry} theme={theme} zh={zh} />
+        : <RuntimeRow key={`${entry.at}-${entry.kind}-${index}`} entry={entry} theme={theme} />)
         : <text fg={theme.muted}>{zh ? '暂无日志。' : 'No log entries.'}</text>}
     </box>
   );

@@ -5,6 +5,24 @@ export type SessionPresence = 'unclaimed' | 'claimed' | 'stale';
 
 export type SessionIdentity = { sessionId: string; sessionToken: string };
 
+export type ToolAuditStatus = 'running' | 'completed' | 'failed' | 'timeout';
+export type ToolAuditSource = 'apps' | 'actions' | 'tui' | 'test';
+export type ToolAuditEvent = {
+  id: string;
+  /** Stable invocation start time. Completion updates keep this value unchanged. */
+  timestamp: string;
+  completedAt?: string;
+  source: ToolAuditSource;
+  action: string;
+  status: ToolAuditStatus;
+  durationMs: number;
+  error?: { code: string; message?: string };
+  workspace: string;
+  session: string;
+  args?: unknown;
+  result?: unknown;
+};
+
 export type TaskPackage = {
   objective: string;
   background: string;

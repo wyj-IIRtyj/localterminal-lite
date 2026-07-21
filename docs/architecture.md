@@ -23,7 +23,7 @@ ChatGPT Apps / Actions
        workspace-scoped state                    workspace-scoped state
 
 Global installation state
-  settings.json
+  config.json
   workspaces.json             durable workspace catalog + transient process lease
   clusters/*.json             shared-port membership and leader election
   passive-lock/*              one global macOS helper, owned by all live runtimes
@@ -64,17 +64,17 @@ Git is an optional workspace capability. The Diff tracker probes once and degrad
 
 ### Credential visibility
 
-Credentials are hidden by default and may be visible only while an eligible `v` press is active. Any key-release packet, navigation, modal transition, or loss of eligible context hides them. Release handling is intentionally independent of the reported key name.
+Credentials are hidden by default and may be visible only while eligible `v` press/repeat events keep extending a 450ms deadline. Some terminal protocols emit unnamed release packets between repeats, so release packets do not directly toggle visibility. When repeats stop, the deadline hides credentials; navigation, modal transition, or loss of eligible context hides them immediately.
 
 ## Module boundaries
 
 | Layer | Primary modules | Responsibility |
 |---|---|---|
 | Entry/configuration | `cli.ts`, `config.ts`, `migration.ts` | startup, settings, compatibility |
-| Runtime/process | `server.ts`, `cluster.ts`, `cluster-router.ts`, `instances.ts` | HTTP lifecycle, process topology, routing, leases |
-| Domain/state | `store.ts`, `types.ts`, `tui-model.ts` | sessions, messages, events, durable state |
+| Runtime/process | `server.ts`, `cluster.ts`, `cluster-router.ts`, `control-channel.ts`, `runtime-lifecycle.ts`, `instances.ts` | HTTP/control lifecycle, process topology, routing, leases |
+| Domain/state | `store.ts`, `types.ts`, `tui-model.ts` | sessions, messages, events, journal/snapshot persistence, audit history |
 | Extension facade | `extensions.ts`, `core-tools.ts`, `mcp.ts`, `openapi.ts` | authenticated tool discovery, registration and calls |
-| Resource adapters | `session-resources.ts`, `diff.ts`, `security.ts` | OS helpers, Git sampling, path/credential safety |
+| Resource adapters | `session-resources.ts`, `diff.ts`, `security.ts`, `update.ts`, `update-transaction.ts` | OS helpers, Git sampling, path/credential safety, transactional updates |
 | TUI contracts/presentation | `tui/contracts.ts`, `tui/workspace-selector.ts`, `runtime-settings.ts`, `tui/credential-visibility.ts` | shared view models and interaction contracts |
 | TUI orchestration/rendering | `tui/state.ts`, `tui/App.tsx`, screens/components | use cases and rendering |
 
@@ -83,7 +83,7 @@ Credentials are hidden by default and may be visible only while an eligible `v` 
 1. A live process lease belongs to exactly one workspace at a time.
 2. A public gateway never serves after its member registration is removed.
 3. Only the last live LocalTerminal process may stop the global passive-lock helper.
-4. Credentials fail closed on release and context transitions.
+4. Credentials fail closed after the bounded repeat deadline and immediately on context transitions.
 5. No Diff operation reads an unbounded file or produces unbounded output.
 6. Setup, startup selection, and Settings consume the same complete workspace selector model.
 7. Workspace-local state never escapes into another workspace and internal state is excluded from tools and Diff.
