@@ -1208,6 +1208,8 @@ test('macOS binary release packages and resolves the passive-lock helper source'
   assert.match(workflow, /bun-darwin-x64-baseline/);
   assert.match(workflow, /bun-linux-x64-baseline/);
   assert.match(workflow, /bun-windows-x64-baseline/);
+  assert.match(workflow, /bun-v1\.3\.14\/bun-windows-x64-baseline\.zip/);
+  assert.match(workflow, /Build standalone executable with baseline Bun/);
 });
 
 test('idle TUI refresh is revision-driven and never forces periodic deep snapshot renders', () => {
