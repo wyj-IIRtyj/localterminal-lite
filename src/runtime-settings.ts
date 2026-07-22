@@ -16,5 +16,7 @@ export function runtimeSettingsSnapshot(runtime: LiteRuntime, persisted?: LiteSe
     uiLanguage: config.uiLanguage,
     uiTheme: config.uiTheme,
     passiveLockEnabled: persisted?.passiveLockEnabled ?? config.passiveLockEnabled,
+    actionsContinuationMode: persisted?.actionsContinuationMode ?? config.actionsContinuationMode,
+    nonBlockingTasksEnabled: persisted?.nonBlockingTasksEnabled ?? config.nonBlockingTasksEnabled,
   };
 }

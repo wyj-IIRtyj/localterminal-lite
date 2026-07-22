@@ -96,6 +96,8 @@ export function createDefaultSettings(workspaceDir = defaultWorkspaceForCwd()): 
     uiLanguage: 'zh-CN',
     uiTheme: 'dark',
     passiveLockEnabled: false,
+    actionsContinuationMode: 'off',
+    nonBlockingTasksEnabled: false,
   };
 }
 
@@ -112,6 +114,8 @@ export function validateSettings(settings: LiteSettings): string[] {
   if (!['en', 'zh-CN'].includes(settings.uiLanguage)) errors.push('UI language must be en or zh-CN.');
   if (!['dark', 'light'].includes(settings.uiTheme)) errors.push('UI theme must be dark or light.');
   if (typeof settings.passiveLockEnabled !== 'boolean') errors.push('Passive lock enabled must be boolean.');
+  if (!['off', 'adaptive', 'next-call', 'lookahead-3'].includes(settings.actionsContinuationMode)) errors.push('Actions continuation mode must be off, adaptive, next-call, or lookahead-3.');
+  if (typeof settings.nonBlockingTasksEnabled !== 'boolean') errors.push('Non-blocking tasks enabled must be boolean.');
   return errors;
 }
 
@@ -159,7 +163,7 @@ export function parseLiteSettings(env: NodeJS.ProcessEnv = process.env): LiteSet
   if (!existsSync(configPath)) return undefined;
   const parsed = JSON.parse(readFileSync(configPath, 'utf8')) as Partial<LiteSettings>;
   if (parsed.schemaVersion !== 1) throw new Error(`Unsupported Lite settings format: ${configPath}`);
-  const settings = { uiLanguage: 'zh-CN', uiTheme: 'dark', passiveLockEnabled: false, ...parsed } as LiteSettings;
+  const settings = { uiLanguage: 'zh-CN', uiTheme: 'dark', passiveLockEnabled: false, actionsContinuationMode: 'off', nonBlockingTasksEnabled: false, ...parsed } as LiteSettings;
   const errors = validateSettings(settings);
   if (errors.length) throw new Error(`Invalid Lite settings: ${errors.join(' ')}`);
   return settings;
@@ -213,6 +217,12 @@ export function settingsWithEnvironment(settings: LiteSettings, env: NodeJS.Proc
     connectorKey: optionalEnv(env.LITE_CONNECTOR_KEY) || settings.connectorKey,
     maxOutputChars: boundedInteger(env.LITE_MAX_OUTPUT_CHARS, settings.maxOutputChars, 4_000, 1_000_000),
     commandTimeoutSec: boundedInteger(env.LITE_COMMAND_TIMEOUT_SEC, settings.commandTimeoutSec, 1, 3600),
+    actionsContinuationMode: ['off', 'adaptive', 'next-call', 'lookahead-3'].includes(String(env.LITE_ACTIONS_CONTINUATION_MODE))
+      ? env.LITE_ACTIONS_CONTINUATION_MODE as LiteSettings['actionsContinuationMode']
+      : settings.actionsContinuationMode,
+    nonBlockingTasksEnabled: env.LITE_NON_BLOCKING_TASKS === undefined
+      ? settings.nonBlockingTasksEnabled
+      : /^(1|true|yes|on)$/i.test(env.LITE_NON_BLOCKING_TASKS),
   };
 }
 
@@ -258,6 +268,8 @@ export function loadLiteConfig(env: NodeJS.ProcessEnv = process.env): LiteConfig
     uiLanguage: settings.uiLanguage,
     uiTheme: settings.uiTheme,
     passiveLockEnabled: settings.passiveLockEnabled,
+    actionsContinuationMode: settings.actionsContinuationMode,
+    nonBlockingTasksEnabled: settings.nonBlockingTasksEnabled,
   };
 }
 

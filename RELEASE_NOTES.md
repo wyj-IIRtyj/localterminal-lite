@@ -1,27 +1,45 @@
-# LocalTerminal Lite v1.1.1
+# LocalTerminal Lite v1.1.2
 
-LocalTerminal Lite v1.1.1 is a stability, auditability, performance, and binary-installation release. It is the first public stable release after v1.0.1 to distribute verified standalone executables for macOS, Linux, and Windows, while preserving existing user configuration, workspace state, sessions, messages, history, and credentials.
+LocalTerminal Lite v1.1.2 focuses on long-task continuity, optional non-blocking execution, bounded history performance, Apps capability completeness, and Windows process reliability. Existing settings, credentials, workspaces, sessions, messages, extensions, and history are preserved.
+
+> [!IMPORTANT]
+> **Known Windows limitation:** the supported PowerShell TUI path is keyboard-only compatibility mode. Mouse capture is disabled by default because it can become unresponsive or freeze under Windows PowerShell and PowerShell 7. All pages, forms, and exact session selectors remain keyboard-operable with arrows, `PgUp/PgDn`, `Home/End`, `Enter`, and page shortcuts. `LITE_WINDOWS_TUI_MODE=mouse` is experimental and is not recommended for critical work.
 
 ## Highlights
 
-- Multi-workspace processes can safely share one public port with explicit leader/member routing and automatic failover.
-- Workspace selection is consistent across first-run setup, startup, and Settings, and now includes an explicit **Add a new workspace** action.
-- Cluster membership is self-healing. A deleted registry is rebuilt from the live member record; malformed registries are reported as degraded instead of being misrepresented as an empty cluster.
-- A single process on a port is shown as normal **single-workspace mode**. Shared-port process counts are based on persisted live members rather than UI fallback values.
-- Non-Git workspaces are supported. The Diff view safely disables itself when Git is unavailable or the directory is not a repository.
-- Diff processing is bounded: Git subprocesses have deadlines and output caps, and large or binary untracked files are sampled rather than loaded completely into memory.
-- Apps and Actions now share one operation lifecycle. Logs show source, tool, sanitized complete arguments, start time, live `running` state, sanitized complete result, duration, and the final `completed`, `failed`, or `timeout` state in one logical record.
-- High-frequency session activity and durable messages use a crash-recoverable incremental journal with periodic atomic snapshots. A 5,100-message persistence regression dropped from about 16 seconds to under 0.7 seconds in the local benchmark.
-- TUI snapshots are revision-cached, so idle polling and interaction-only renders no longer deep-clone the full session/message state and Diff payload.
-- Session and conversation grouping now use linear indexing before their final sorts. A synthetic 10,000-session continuation/child model dropped from about 468 ms to about 7 ms locally; grouping 100,000 messages took about 17 ms.
-- Credential reveal is fail-closed without flicker: `V` press/repeat extends a 450ms deadline, while navigation, forms, or leaving an eligible screen hide credentials immediately. Unreliable unnamed release packets no longer briefly hide and re-show credentials between repeats.
-- The macOS passive-lock helper remains active until the last LocalTerminal process exits.
-- Workspace runtime leases are atomically published and released, including repeated A → B → C workspace switching.
-- Architecture boundaries, ownership rules, coupling risks, and follow-up refactoring targets are documented.
+- The optional Actions long-task harness is **off by default**. `adaptive` enforces 1–3 exact next calls, while `next-call` and `lookahead-3` provide deterministic diagnostic modes. Mode changes emit `requirements_changed`; discovery returns the current contract.
+- Optional non-blocking tasks are independent and **off by default**. When enabled, calls exceeding the 200ms response budget continue locally and return a `taskId`; `task_poll` follows them to a terminal result.
+- Background results are bounded by a 30-minute lifetime, 100 retained tasks, and 24 MiB of serialized responses. Runtime shutdown cancels owned command trees and closes their audit records.
+- ChatGPT Apps keeps the complete generic `extension_call` and `extension_register` facade, including arbitrary commands, overwrite-capable writes, patches, and custom extensions. Narrow direct MCP tools and content-addressed Blob staging remain available alongside it.
+- Bootstrap Actions calls now accept an explicit `identity:null` as absent while continuing to reject malformed authenticated identities such as `identity:{}`.
+- History uses sparse, stat-validated indexes and bounded range reads. Inbox, TUI message snapshots, session detail, and logs return bounded windows instead of repeatedly materializing all persisted data.
+- Tool audits retain one logical record from `running` to `completed`, `failed`, or `timeout`. Background execution updates that same record rather than creating duplicates.
+- Windows shell commands use private one-shot batch entrypoints so nested quotes retain their meaning. Each command runs in an independent process group; timeout and shutdown wait for tree termination without killing the LocalTerminal runtime.
+- Windows TUI compatibility no longer depends on `WT_SESSION`. It uses main-screen rendering at 20 FPS, disables the native output thread and Kitty keyboard negotiation, and provides complete keyboard navigation.
+- Obsolete review reports, resolved issue notes, and dated acceptance documents were removed. README, Actions setup, GPT Instructions/Introduction, architecture, privacy, and manual installation documents now describe the shipping behavior.
+
+## Performance verification
+
+The release regression workload on the release-development host produced:
+
+- 100,000 history entries: sparse index plus newest 200 entries in about 59.6ms, approximately 5.2 MiB RSS growth;
+- 5,000 inbox messages: newest 50 messages and observations in about 82.6ms;
+- 5,000 source messages: bounded 500-message TUI snapshot in about 0.65ms.
+
+Exact timings vary by host. The release gates enforce bounded returned collections and guard against sustained memory growth.
+
+## Windows verification
+
+Windows 11 ARM64 under Parallels, running the x64 baseline binary through the compatibility layer, passed separate automated acceptance runs from:
+
+- Windows PowerShell 5.1.26100.7920;
+- PowerShell 7.6.3.
+
+Both runs covered executable verification, headless health, Actions session registration, quoted commands, forced PowerShell child-tree timeout, timeout response semantics, and a post-timeout runtime health check. The TUI is usable in the supported keyboard compatibility mode; the mouse limitation above remains intentional and documented.
 
 ## Binary release assets
 
-The release publishes standalone executables and SHA-256 files for:
+The release workflow builds, tests, packages, installs, and verifies:
 
 - macOS Apple Silicon (`darwin-arm64`)
 - macOS Intel (`darwin-x64`)
@@ -29,77 +47,50 @@ The release publishes standalone executables and SHA-256 files for:
 - Linux x64 (`linux-x64`)
 - Windows x64 (`windows-x64`)
 
-The installers download only the matching platform asset. Git, Node.js, Bun, dependency installation, and a source checkout are no longer required for release installations.
-The three x64 executables use Bun's baseline targets for compatibility with older CPUs that do not provide AVX. Windows verifies both the freshly expanded candidate and the installed copy with bounded retries before publishing the active-version pointer.
+Each archive has a matching SHA-256 file. The x64 assets use Bun baseline targets for older CPU compatibility.
 
-## One-command, lossless update
+## One-command update
 
 ### macOS
 
 ```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.1.1/scripts/install-macos.sh)"
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.1.2/scripts/install-macos.sh)"
 ```
 
 ### Linux
 
 ```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.1.1/scripts/install-linux.sh)"
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.1.2/scripts/install-linux.sh)"
 ```
 
 ### Windows PowerShell
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.1.1/scripts/install-windows.ps1 | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.1.2/scripts/install-windows.ps1 | iex"
 ```
 
-The same commands cover:
-
-- the GitHub `v1.0.1` source-archive installation;
-- intermediate development installations created during the v1.1.1 development cycle;
-- an existing versioned binary installation;
-- a clean first installation.
-
-The migration recognizes the old source layout, moves it to a recovery backup under the user configuration directory, installs the platform binary into `releases/v1.1.1`, and atomically updates the `current` pointer. A failed migration restores the original installation; successful legacy backups are retained with bounded pruning. User configuration and workspace/session state live outside the program directory and are never deleted by the installer.
-
-Git source checkouts are intentionally not overwritten. Continue updating a checkout with Git, or install the release binary into another `LOCALTERMINAL_LITE_HOME`.
-
-## Updating after v1.1.1
-
-LocalTerminal Lite checks GitHub Releases at startup. When Settings reports an available version, press `U` to run the matching platform installer. The updater downloads the new binary and checksum, installs it beside the old release, and atomically switches the `current` pointer. The active release and one rollback release are retained.
-
-Installing an update does not replace code already loaded in running processes. In a shared-port group, restart member processes one at a time and restart the current leader last.
-
-## Compatibility notes
-
-- The current cluster protocol remains version `1`, allowing rolling restart between compatible v1.x members.
-- Existing Apps and Actions credentials are preserved.
-- Existing workspace registry, session state, message history, extension definitions, logs, and TUI settings are preserved.
-- Users who changed the installation root should run the installer with the same `LOCALTERMINAL_LITE_HOME` value. The in-app updater carries the detected installation root automatically.
+The installers preserve configuration and workspace state, install into a versioned release directory, verify the downloaded asset and installed executable, and atomically update the `current` pointer. Running processes continue using their loaded version until restarted; in a shared-port group, restart members one at a time and the current leader last.
 
 ## Verification
 
-This release passed type checking, production build, the complete automated test suite, dependency audit, standalone executable smoke tests, installer migration tests, and host/VM validation on macOS, Windows, and Linux ARM64. The release workflow repeats the complete suite and packaged-installer checks on all five native build runners before publishing assets.
-
+The release candidate passed TypeScript checking, 88 automated tests, documentation/link checks, the bounded performance regression, standalone macOS and Windows x64 builds, and the PowerShell 5.1/7.6.3 VM checks above. The tag-triggered GitHub workflow repeats the full test and packaged-installer suite on all five platform runners before publishing assets.
 
 ## 中文说明
 
-LocalTerminal Lite v1.1.1 是 v1.0.1 之后首个公开提供预编译二进制的稳定版本。macOS、Linux 和 Windows 安装器会下载对应平台的独立可执行文件并校验 SHA-256，不再要求用户预先安装 Git、Node.js 或 Bun。
+LocalTerminal Lite v1.1.2 重点完善长任务持续执行、可选非阻塞任务、有界历史性能、Apps 完整能力以及 Windows 进程可靠性。升级会保留已有配置、凭据、工作区、session、消息、扩展和历史。
 
-本版本重点包括：
+> [!IMPORTANT]
+> **Windows 已知限制：** PowerShell TUI 正式支持的是纯键盘兼容模式。鼠标捕获默认关闭，因为它在 Windows PowerShell 与 PowerShell 7 中可能无响应或导致界面卡死。所有页面、表单和精确 session 选择都可使用方向键、`PgUp/PgDn`、`Home/End`、`Enter` 与页面快捷键完成。`LITE_WINDOWS_TUI_MODE=mouse` 仅供实验，不建议用于关键任务。
 
-- 多工作区进程可共享同一个公开端口，并支持 leader/member 路由和自动故障转移。
-- 集群注册表可根据存活成员记录真实自愈；损坏状态会明确进入降级，而不会伪装成空集群。
-- Settings、首次启动和工作区选择器统一支持新增工作区。
-- 外置卷暂时卸载、系统休眠恢复和目录权限暂时不可用时，运行时进入重新验证或降级状态，不会覆盖凭据，也不会卡死整个 TUI。
-- 顶层渲染错误、异步错误和进程级异常均会记录日志并执行一次性安全关闭。
-- 凭据只会在 `V` 按键重复维持的 450ms 截止时间内短暂显示；停止重复后自动隐藏，切换页面或打开表单会立即隐藏，不可靠的空名称 release 包不会再造成闪烁。
-- macOS 被动锁屏 helper 已随二进制发行包一起安装，不再依赖 `$bunfs` 中不可访问的源码路径。
-- 安装下载支持中断后续传；不完整安装目录可以在再次运行安装器时恢复。
-- Apps 与 Actions 使用同一套调用生命周期；Logs 会在一条逻辑记录中显示来源、工具、脱敏后的完整参数与返回、开始时间、实时状态和耗时。
-- 高频 session 活动和消息持久化改为可崩溃恢复的增量 journal 与周期性原子快照；本机 5100 条消息回归由约 16 秒降至 0.7 秒以内。
-- TUI 快照按 revision 复用，空闲轮询和纯交互渲染不再深拷贝全部 session、消息和 Diff 数据。
-- Session/会话分组改为线性索引后再排序；本机 10000 个 session 的合成长链场景由约 468ms 降至约 7ms，100000 条消息分组约 17ms。
-- 三个 x64 资产使用 Bun baseline 目标，兼容不支持 AVX 的较旧 CPU；Windows 安装器会在切换当前版本前分别验证解压候选程序和安装后的程序副本，并对安全软件造成的瞬态启动干扰进行有界重试。
-- 旧版源码安装、开发中间版本和已有二进制安装会在保留配置、工作区注册表、session、消息、历史、扩展、日志和凭据的前提下迁移。
+本版本主要变化：
 
-本地门禁已完成类型检查、生产构建、完整测试、依赖审计以及 macOS 宿主机、Ubuntu ARM64 和 Windows 11 的安装启动验证。发布 workflow 还会在五个平台的真实 runner 上重新执行完整测试、独立二进制构建、安装包解析、部分下载续传、不完整安装恢复、安装后资源诊断、版本输出和校验文件验证，全部通过后才发布资产。
+- Actions 长任务增强 Harness 默认关闭。`adaptive` 强制 1–3 个准确后续调用，`next-call` 与 `lookahead-3` 用于确定性诊断；切换模式后会发送 `requirements_changed`，模型应重新 discovery 当前合约。
+- 非阻塞任务是独立开关且默认关闭。开启后，超过 200ms 的调用会在本机继续并返回 `taskId`，由 `task_poll` 轮询到终态；结果缓存具有 30 分钟、100 项和 24 MiB 三重上限。
+- Apps 保留完整通用 facade，包括任意命令、覆盖写入、patch 和自定义扩展，同时继续提供窄接口工具与内容寻址 Blob。
+- Actions bootstrap 兼容显式 `identity:null`，但认证调用仍会拒绝 `identity:{}` 等无效身份。
+- 历史、inbox、TUI 消息快照、session 详情和日志都改为有界读取，避免数据增长后反复加载全部状态。
+- Windows 命令通过私有的一次性批处理入口保留嵌套引号，并在独立进程组中运行；超时和关闭会等待命令树终止，不再误伤 Runtime。
+- Windows TUI 不再根据 `WT_SESSION` 自动切换高风险路径。默认使用主屏、20 FPS、关闭原生输出线程和 Kitty 协议，并补齐纯键盘导航。
+- 已清理旧审查报告、已解决 issue 记录与过期验收文档；README、Actions 教程、GPT Instructions/Introduction、架构、隐私和手动安装说明均与当前行为一致。
+
+发布候选已通过 88 项自动测试、文档链接检查、10 万历史/5000 消息性能回归、macOS 与 Windows x64 独立二进制构建，以及 Parallels Windows 11 中 Windows PowerShell 5.1 和 PowerShell 7.6.3 的独立自动验收。GitHub tag 工作流会再次在五个平台 runner 上运行完整测试、安装器演练并生成带 SHA-256 的发布资产。

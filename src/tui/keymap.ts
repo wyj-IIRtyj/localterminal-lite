@@ -39,8 +39,14 @@ export function useAppKeymap(actions: Actions): void {
     enabled: enabled && !detail,
     bindings: [
       ...([1, 2, 4].includes(tab) ? [
+        { key: 'down', cmd: command(() => actions.moveSelection(1)) },
+        { key: 'up', cmd: command(() => actions.moveSelection(-1)) },
         { key: 'j', cmd: command(() => actions.moveSelection(1)) },
         { key: 'k', cmd: command(() => actions.moveSelection(-1)) },
+        { key: 'pagedown', cmd: command(() => actions.moveSelection(10)) },
+        { key: 'pageup', cmd: command(() => actions.moveSelection(-10)) },
+        { key: 'home', cmd: command(() => actions.moveSelection(-Number.MAX_SAFE_INTEGER)) },
+        { key: 'end', cmd: command(() => actions.moveSelection(Number.MAX_SAFE_INTEGER)) },
       ] : []),
       ...(tab === 1 ? [
         { key: 'return', cmd: command(actions.open) },

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-version="${LOCALTERMINAL_LITE_VERSION:-v1.1.1}"
+version="${LOCALTERMINAL_LITE_VERSION:-v1.1.2}"
 repository="wyj-IIRtyj/localterminal-lite"
 install_dir="${LOCALTERMINAL_LITE_HOME:-$HOME/LocalTerminal-Lite}"
 launcher_dir="${LOCALTERMINAL_LITE_BIN_DIR:-$HOME/.local/bin}"

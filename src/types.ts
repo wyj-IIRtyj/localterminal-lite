@@ -2,6 +2,7 @@ export type JsonObject = Record<string, unknown>;
 
 export type SessionPhase = 'pending' | 'working' | 'waiting' | 'blocked' | 'completed' | 'cancelled';
 export type SessionPresence = 'unclaimed' | 'claimed' | 'stale';
+export type ActionsContinuationMode = 'off' | 'adaptive' | 'next-call' | 'lookahead-3';
 
 export type SessionIdentity = { sessionId: string; sessionToken: string };
 
@@ -31,6 +32,18 @@ export type TaskPackage = {
   constraints: string[];
 };
 
+export type PlannedToolCall = {
+  tool: string;
+  input: JsonObject;
+  purpose?: string;
+};
+
+export type ContinuationPlan = {
+  createdAt: string;
+  completedCalls: PlannedToolCall[];
+  remainingCalls: PlannedToolCall[];
+};
+
 export type SessionCheckpoint = {
   at: string;
   phase: SessionPhase;
@@ -40,6 +53,8 @@ export type SessionCheckpoint = {
   artifacts?: string[];
   milestone?: string;
   tags?: string[];
+  nextCalls?: PlannedToolCall[];
+  replanReason?: string;
 };
 
 export type SessionController = {
@@ -65,6 +80,7 @@ export type LiteSession = {
   checkpointStartedAt?: string;
   checkpointReminderEmittedAt?: string;
   latestCheckpoint?: SessionCheckpoint;
+  continuationPlan?: ContinuationPlan;
   finalSummary?: string;
   tags: string[];
   createdAt: string;
@@ -83,7 +99,8 @@ export type LiteMessage = {
 
 export type SessionEventKind =
   | 'message' | 'child_created' | 'milestone' | 'phase_changed' | 'blocked'
-  | 'completed' | 'stale' | 'checkpoint_due' | 'claimed' | 'revoked' | 'released' | 'cancelled';
+  | 'completed' | 'stale' | 'checkpoint_due' | 'claimed' | 'revoked' | 'released' | 'cancelled'
+  | 'requirements_changed';
 
 export type SessionEvent = {
   id: string;
@@ -153,6 +170,7 @@ export type StoredState = {
   subscriptions: SessionSubscription[];
   appBindings: AppSessionBinding[];
   extensions: CustomExtensionSpec[];
+  harnessContract?: { mode: ActionsContinuationMode; revision: string; updatedAt: string };
 };
 
 export type LiteSettings = {
@@ -168,6 +186,8 @@ export type LiteSettings = {
   uiLanguage: 'en' | 'zh-CN';
   uiTheme: 'dark' | 'light';
   passiveLockEnabled: boolean;
+  actionsContinuationMode: ActionsContinuationMode;
+  nonBlockingTasksEnabled: boolean;
 };
 
 export type LiteConfig = {
@@ -184,6 +204,8 @@ export type LiteConfig = {
   uiLanguage: 'en' | 'zh-CN';
   uiTheme: 'dark' | 'light';
   passiveLockEnabled: boolean;
+  actionsContinuationMode: ActionsContinuationMode;
+  nonBlockingTasksEnabled: boolean;
 };
 
 export type SessionHistoryEntry = { at: string; type: string; data: JsonObject };
@@ -193,6 +215,7 @@ export type InvocationContext = {
   authenticatedSession?: LiteSession;
   clientSessionKey?: string;
   transport: 'apps' | 'actions' | 'tui' | 'test';
+  signal?: AbortSignal;
 };
 
 export type ToolResponse = {

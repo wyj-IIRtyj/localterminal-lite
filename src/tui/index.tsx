@@ -13,18 +13,16 @@ import { Setup } from './Setup.js';
 import { themeFor, TuiController, type FormQuestion, type RuntimeReconfigure } from './state.js';
 import { FormDialog } from './components/FormDialog.js';
 import { buildWorkspaceSelectorModel } from './workspace-selector.js';
+import { rendererProfile } from './renderer-profile.js';
 
 export type { RuntimeReconfigure, RuntimeReconfigureResult } from './state.js';
 
 async function createRenderer(): Promise<CliRenderer> {
   return createCliRenderer({
-    targetFps: 60,
+    ...rendererProfile(),
     exitOnCtrlC: false,
     clearOnShutdown: true,
-    screenMode: 'alternate-screen',
-    useMouse: true,
     autoFocus: true,
-    useKittyKeyboard: { disambiguate: true, alternateKeys: true },
   });
 }
 
@@ -44,6 +42,7 @@ export async function runSetupTui(defaults: LiteSettings, records: WorkspaceReco
       root = renderWithKeymap(renderer, createElement(Setup, {
         defaults,
         records,
+        mouseEnabled: renderer.useMouse,
         onComplete: resolve,
         onCancel: () => reject(new Error('Setup cancelled.')),
       }));
@@ -68,11 +67,14 @@ export async function runWorkspaceChooserTui(records: WorkspaceRecord[], current
     return await new Promise<string | undefined>((resolve, reject) => {
       root = renderWithKeymap(renderer, createElement(FormDialog, {
         questions: [question],
-        preamble: [zh ? '使用方向键或鼠标选择工作区。' : 'Choose a workspace with arrow keys or the mouse.'],
+        preamble: [renderer.useMouse
+          ? (zh ? '使用方向键或鼠标选择工作区。' : 'Choose a workspace with arrow keys or the mouse.')
+          : (zh ? '使用方向键选择工作区，按 Enter 确认。' : 'Choose a workspace with arrow keys and press Enter.')],
         theme: themeFor('dark'),
         width: renderer.width,
         height: renderer.height,
         zh,
+        mouseEnabled: renderer.useMouse,
         onComplete: (answers: string[]) => {
           const selected = selectedWorkspace(items, answers[0]);
           if (!selected) { reject(new Error('Invalid workspace selection.')); return; }
@@ -92,6 +94,7 @@ export async function runWorkspaceChooserTui(records: WorkspaceRecord[], current
             width: renderer.width,
             height: renderer.height,
             zh,
+            mouseEnabled: renderer.useMouse,
             onComplete: (pathAnswers: string[]) => resolve(pathAnswers[0]),
             onCancel: () => resolve(undefined),
           }));
@@ -118,6 +121,7 @@ export async function runChoiceTui(question: FormQuestion, preamble: string[], z
         width: renderer.width,
         height: renderer.height,
         zh,
+        mouseEnabled: renderer.useMouse,
         onComplete: (answers: string[]) => resolve(answers[0] || question.fallback || ''),
         onCancel: () => resolve('cancel'),
       }));
@@ -143,8 +147,8 @@ export class LiteTui {
       });
     } finally {
       root?.unmount();
-      await controller.shutdown();
       renderer.destroy();
+      await controller.shutdown();
     }
   }
 }

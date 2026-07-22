@@ -220,7 +220,8 @@ test('action lifecycle audit records start, success, failure, timeout, workspace
     assert.equal(ok.ok, true);
 
     const timeout = await service.call({ tool: 'timeout_action', input: { token: 'DO-NOT-PERSIST' }, identity }, { transport: 'actions' });
-    assert.equal(timeout.ok, true);
+    assert.equal(timeout.ok, false);
+    assert.equal(timeout.error.code, 'ACTION_TIMEOUT');
 
     const domain = await service.call({ tool: 'domain_action', input: {}, identity }, { transport: 'actions' });
     assert.equal(domain.ok, true);

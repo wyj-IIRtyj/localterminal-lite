@@ -4,7 +4,7 @@
 
 LocalTerminal Lite gives **ChatGPT's normal chat mode a controlled way to work on your local computer**. After you connect Lite through a custom GPT Action or a ChatGPT App, a regular ChatGPT conversation can inspect and edit the authorized local project, run bounded tools, coordinate multiple work sessions, and report progress while you retain control in a local TUI. Lite is the bridge between ChatGPT chat and your computer; it is not a replacement chat client.
 
-LocalTerminal Lite 1.1.1 provides that bridge through an auditable, inheritable work-session layer. It supports ChatGPT **Actions** and **Apps (MCP)**, multi-session collaboration, durable messages, declarative extensions, Git-style live diff tracking, and a full-window bilingual OpenTUI interface.
+LocalTerminal Lite 1.1.2 provides that bridge through an auditable, inheritable work-session layer. It supports ChatGPT **Actions** and **Apps (MCP)**, multi-session collaboration, durable messages, declarative extensions, Git-style live diff tracking, and a full-window bilingual OpenTUI interface.
 
 ![LocalTerminal Lite session hierarchy](docs/assets/tui/sessions-en.svg)
 
@@ -12,25 +12,28 @@ LocalTerminal Lite 1.1.1 provides that bridge through an auditable, inheritable 
 
 ### First installation
 
-You do not need Git, Node.js, Bun, or another programming environment beforehand. The installers download the standalone `v1.1.1` executable for the current operating system and CPU architecture, verify its SHA-256 checksum, register the global `localterminal-lite` command, and start the TUI. Release installations no longer download a source archive or runtime dependencies.
+You do not need Git, Node.js, Bun, or another programming environment beforehand. The installers download the standalone `v1.1.2` executable for the current operating system and CPU architecture, verify its SHA-256 checksum, register the global `localterminal-lite` command, and start the TUI. Release installations no longer download a source archive or runtime dependencies.
 
 #### macOS
 
 ```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.1.1/scripts/install-macos.sh)"
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.1.2/scripts/install-macos.sh)"
 ```
 
 #### Linux
 
 ```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.1.1/scripts/install-linux.sh)"
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.1.2/scripts/install-linux.sh)"
 ```
 
 #### Windows PowerShell
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.1.1/scripts/install-windows.ps1 | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.1.2/scripts/install-windows.ps1 | iex"
 ```
+
+> [!IMPORTANT]
+> **Known Windows limitation:** the supported PowerShell TUI path is keyboard-only compatibility mode. Mouse capture is disabled by default because it can become unresponsive or freeze in Windows PowerShell and PowerShell 7. Use arrows, `PgUp/PgDn`, `Home/End`, `Enter`, and page shortcuts; every page and exact session selector is keyboard-operable. `$env:LITE_WINDOWS_TUI_MODE='mouse'` is experimental and should not be used for critical work. Remove the variable to restore the stable 20 FPS main-screen profile.
 
 Remote scripts are convenient but security-sensitive. You can inspect [install-macos.sh](scripts/install-macos.sh), [install-linux.sh](scripts/install-linux.sh), or [install-windows.ps1](scripts/install-windows.ps1) before running them.
 
@@ -40,7 +43,7 @@ The first-run TUI configures everything: language, theme, authorized workspace, 
 
 ### Start it again later
 
-Open a new Terminal, PowerShell, or Command Prompt window and use the global command installed for your user account. The launcher resolves the current executable through a versioned `releases/<version>` directory and an atomic `current` pointer. Users of the GitHub `v1.0.1` source-archive installation, an intermediate development installation, or an earlier binary release may run the `v1.1.1` installer directly for a lossless migration. Settings, credentials, workspaces, sessions, messages, and history are preserved.
+Open a new Terminal, PowerShell, or Command Prompt window and use the global command installed for your user account. The launcher resolves the current executable through a versioned `releases/<version>` directory and an atomic `current` pointer. Users of the GitHub `v1.0.1` source-archive installation, an intermediate development installation, or an earlier binary release may run the `v1.1.2` installer directly for a lossless migration. Settings, credentials, workspaces, sessions, messages, and history are preserved.
 
 ```text
 localterminal-lite
@@ -68,15 +71,17 @@ bun run dev
 
 A GPT can use Apps or Actions, not both at once. For Actions, follow the complete privacy-safe [English tutorial](docs/ACTIONS_SETUP.md) or [Chinese tutorial](docs/ACTIONS_SETUP.zh-CN.md). It covers HTTPS tunneling, schema import, Bearer authentication, GPT setup, Preview testing, and common error messages.
 
-## Why three facade tools
+## Connection-specific tool surfaces
 
-The model sees exactly three operations:
+GPT Actions sees exactly three stable facade operations:
 
 - `extension_discover`: learn identity, concrete tools, schemas, and extension registration;
 - `extension_call`: invoke a concrete workspace, Git, session, message, or custom tool;
 - `extension_register`: validate, upsert, or remove a declarative extension.
 
-The small surface keeps configuration stable while concrete capabilities remain discoverable. In Actions, operation IDs use camelCase (`extensionDiscover`, `extensionCall`, `extensionRegister`) but preserve the same meanings.
+The small Actions surface keeps the imported OpenAPI configuration stable while concrete capabilities remain discoverable. Operation IDs use camelCase (`extensionDiscover`, `extensionCall`, `extensionRegister`) but preserve the same meanings.
+
+ChatGPT Apps exposes both the same generic `extension_call` / `extension_register` capabilities and narrow direct MCP tools. The generic facade preserves arbitrary commands, overwriting writes, patches, and custom extensions as first-class product capabilities. Direct tools give common session, read, Git, messaging, polling, and Blob operations smaller schemas without replacing the generic path. Apps can stage UTF-8 or base64 content with `blob_create`; `blob_write_file` creates a missing file, treats an identical existing file as an idempotent success, and rejects an existing file with different content. Overwriting remains available through `extension_call` → `write_file` or `apply_patch`.
 
 ```text
 ChatGPT
@@ -97,7 +102,8 @@ A Lite session is a work context, not a ChatGPT conversation ID.
 - Collaboration is active: sessions may safely complete non-conflicting work for one another and hand off incorporable results through durable messages.
 - `session_inherit` uses a one-time claim code for handed-off/released/revoked unfinished work; the same interrupted ChatGPT conversation may reclaim its stale session with the previous sessionToken.
 - Completed work is immutable. Continue it with a same-level `session_register(...continuesSessionId)`, never with `session_inherit`.
-- Session state has highest priority. The final LocalTerminal call of every work turn is a structured `session_checkpoint` with the accurate phase.
+- Session state has highest priority. The optional enhanced Actions long-task harness is **off by default**, so the core session harness is unchanged. Settings offers `adaptive` (1-3 calls, recommended for normal testing), plus the diagnostic `next-call` and `lookahead-3` modes used by the A/B test. Enhanced modes reject out-of-order calls and return the next call after each confirmed completion. After a mode change, active sessions receive a `requirements_changed` event instructing the model to run discovery again.
+- Optional **Non-blocking tasks** are also off by default and independent of the Actions harness. When enabled, ordinary calls exceeding 200ms detach from the request, continue locally, and return a `taskId`; `task_poll` reports progress. Completed responses are held in a bounded, expiring cache. When disabled, calls stay attached until completion or timeout.
 - A root cannot complete until every direct child is terminal and every child message/event has been reviewed. A blocked completion returns child timestamps, last activity, recent operations, message timing, and `mustContinue` guidance.
 - Messages are durable. AI messages keep the authenticated session identity; messages typed by the TUI owner are explicitly attributed to `user`. Message reads include send/observation timestamps, age, audited operations since send, and a delay/staleness notice.
 - Permanent JSONL history stores task packages, checkpoints, messages, state events, and sanitized tool audits.
@@ -108,7 +114,7 @@ The seven full-window pages are Overview, Sessions, Messages, Diff, Extensions, 
 
 ![LocalTerminal Lite overview](docs/assets/tui/overview-en.svg)
 
-- Mouse wheel and keyboard scrolling use native OpenTUI ScrollBox viewports.
+- Mouse-wheel scrolling on macOS/Linux and keyboard scrolling on every platform use OpenTUI ScrollBox viewports; Windows compatibility mode does not capture the mouse by default.
 - Drag selection is renderer-owned and copies through OSC 52 plus the host clipboard.
 - Continuations remain inside one logical session card; delegated children appear as indented directory-style nodes with phase and presence colors.
 - Enter opens complete session history or a two-way message conversation.
@@ -116,7 +122,7 @@ The seven full-window pages are Overview, Sessions, Messages, Diff, Extensions, 
 - Logs show Apps and Actions calls through one lifecycle model. A call appears immediately with source, tool name, sanitized complete arguments, start time, and `running`; the same logical record is then completed with the sanitized complete result, duration, and `completed`, `failed`, or `timeout`.
 - All settings and credential rotation stay inside the TUI. Finite choices use keyboard/mouse selectors; free-text fields replace prefilled content on first typing and support `Ctrl+U` to clear. Hold `V` to reveal credentials; after key repeats stop, they hide within the 450ms fail-closed deadline. Navigation or opening a form hides them immediately.
 
-Input is routed in one order: modal → focused form control → current page → global shortcuts. OpenTUI owns alternate-screen lifecycle, mouse decoding, layout, wrapping, incremental drawing, and terminal restoration.
+Input is routed in one order: modal → focused form control → current page → global shortcuts. OpenTUI owns screen lifecycle, mouse decoding when enabled, layout, wrapping, incremental drawing, and terminal restoration; Windows uses the main-screen compatibility profile by default.
 
 ## Security and privacy
 
@@ -169,7 +175,7 @@ Licensed under the [Apache License 2.0](LICENSE), which permits personal and com
 LocalTerminal Lite is an independent open-source project and is not affiliated with or endorsed by OpenAI or Cloudflare. ChatGPT, OpenAI, and Cloudflare names are used only to describe interoperability.
 ## Updates
 
-LocalTerminal Lite checks the latest GitHub release when the TUI starts. The Settings tab shows the installed and latest versions; press `U` to install an available release. The updater downloads the precompiled executable and SHA-256 file for the current platform, installs it into a new version directory, and atomically switches the `current` pointer. The old version remains available for rollback. Git source checkouts are never overwritten by one-click update. See the [v1.1.1 release notes](RELEASE_NOTES.md) for migration and future-update details.
+LocalTerminal Lite checks the latest GitHub release when the TUI starts. The Settings tab shows the installed and latest versions; press `U` to install an available release. The updater downloads the precompiled executable and SHA-256 file for the current platform, installs it into a new version directory, and atomically switches the `current` pointer. The old version remains available for rollback. Git source checkouts are never overwritten by one-click update. See the [v1.1.2 release notes](RELEASE_NOTES.md) for migration and future-update details.
 
 Workspace state migration is additive and idempotent: existing target state, legacy global state, `state.migrated`, and the workspace `.localterminal-lite` directory are merged by stable IDs, while session history files are deduplicated and retained.
 ## Shared ports and workspace routing

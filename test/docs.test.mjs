@@ -36,18 +36,18 @@ test('bilingual documentation links resolve and private archive data is not publ
   }
   for (const file of publishedAssets.filter((item) => item.endsWith('.svg'))) {
     const text = fs.readFileSync(file, 'utf8');
-    assert.match(text, /v1\.1\.1/, file);
+    assert.match(text, /v1\.1\.2/, file);
     assert.doesNotMatch(text, /v1\.0\.1/, file);
   }
 });
 
-test('stable release metadata and binary installers stay pinned to v1.1.1', () => {
+test('stable release metadata and binary installers stay pinned to v1.1.2', () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-  assert.equal(pkg.version, '1.1.1');
+  assert.equal(pkg.version, '1.1.2');
   assert.equal(pkg.license, 'Apache-2.0');
   for (const file of ['README.md', 'README.zh-CN.md', 'RELEASE_NOTES.md', 'scripts/install-macos.sh', 'scripts/install-linux.sh', 'scripts/install-windows.ps1']) {
     const text = fs.readFileSync(path.join(root, file), 'utf8');
-    assert.match(text, /v1\.1\.1/);
+    assert.match(text, /v1\.1\.2/);
   }
 });
 
@@ -85,16 +85,17 @@ test('binary installers use versioned releases, checksums, atomic current pointe
 test('release notes contain substantive Chinese release and verification guidance', () => {
   const notes = fs.readFileSync(new URL('../RELEASE_NOTES.md', import.meta.url), 'utf8');
   assert.match(notes, /## 中文说明/);
-  assert.match(notes, /下载支持中断后续传/);
-  assert.match(notes, /host\/VM validation/);
+  assert.match(notes, /Windows 已知限制/);
+  assert.match(notes, /PowerShell 7\.6\.3/);
+  assert.match(notes, /keyboard-only compatibility mode/);
   const chinese = notes.match(/[\u3400-\u9fff]/g) || [];
   assert.ok(chinese.length >= 200, `expected substantial Chinese content, got ${chinese.length} characters`);
 });
 
-test('harness, architecture, and resolved-issue docs match v1.1.1 behavior', () => {
+test('harness introduction and architecture match v1.1.2 without stale process reports', () => {
   for (const file of ['docs/GPT_INSTRUCTIONS.md', 'docs/GPT_INSTRUCTIONS.zh-CN.md']) {
     const text = fs.readFileSync(path.join(root, file), 'utf8');
-    assert.match(text, /1\.1\.1/);
+    assert.match(text, /1\.1\.2/);
     assert.match(text, /extensionDiscover/);
     assert.match(text, /extensionCall/);
     assert.match(text, /extensionRegister/);
@@ -102,16 +103,35 @@ test('harness, architecture, and resolved-issue docs match v1.1.1 behavior', () 
     assert.match(text, /completed/);
     assert.match(text, /failed/);
     assert.match(text, /timeout/);
+    assert.match(text, /identity:null/);
+    assert.match(text, /identity:\{\}/);
+    assert.match(text, /next-call/);
+    assert.match(text, /lookahead-3/);
+    assert.match(text, /200ms/);
+    assert.match(text, /task_poll/);
+    assert.match(text, /working checkpoint/);
+    assert.match(text, /off[\s\S]{0,220}nextCalls (?:is optional|可省略)/);
+    assert.doesNotMatch(text, /every working checkpoint (?:must )?use the server continuation contract/);
+    assert.doesNotMatch(text, /每个 working checkpoint 都必须使用服务器续执行协议/);
+  }
+  for (const file of ['docs/ACTIONS_SETUP.md', 'docs/ACTIONS_SETUP.zh-CN.md']) {
+    const text = fs.readFileSync(path.join(root, file), 'utf8');
+    assert.match(text, /ApiTypeError: Expected identity to be a dict/);
+    assert.match(text, /identity:null/);
+    assert.match(text, /identity:\{\}/);
+    assert.match(text, /CONTINUATION_PLAN_REQUIRED/);
+    assert.match(text, /NEXT_CALL_REQUIRED/);
+    assert.match(text, /lookahead-3/);
+    assert.match(text, /static OpenAPI schema does not need to be re-imported|静态 OpenAPI schema 不需要重新导入/);
   }
   const architecture = fs.readFileSync(path.join(root, 'docs', 'architecture.md'), 'utf8');
   assert.match(architecture, /config\.json/);
   assert.doesNotMatch(architecture, /settings\.json/);
   assert.match(architecture, /450ms/);
   assert.match(architecture, /control-channel\.ts/);
-  const issues = fs.readdirSync(path.join(root, 'docs', 'issues')).filter((file) => file.endsWith('.md'));
-  for (const file of issues) {
-    const text = fs.readFileSync(path.join(root, 'docs', 'issues', file), 'utf8');
-    assert.match(text, /Resolved in v1\.1\.1\./, file);
-    assert.doesNotMatch(text, /next release candidate/i, file);
+  assert.match(architecture, /200ms/);
+  assert.match(architecture, /content-addressed Blob/);
+  for (const obsolete of ['docs/issues', 'docs/coupling-analysis.md', 'docs/pre-release-acceptance-2026-07-21.md', 'docs/stability-acceptance-2026-07-21.md', 'docs/manual-acceptance-2026-07-22.zh-CN.md']) {
+    assert.equal(fs.existsSync(path.join(root, obsolete)), false, obsolete);
   }
 });

@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
@@ -49,19 +49,25 @@ function updateWorkspaceRegistry(configDir: string, update: (records: WorkspaceR
   mkdirSync(configDir, { recursive: true, mode: 0o700 });
   const file = registryPath(configDir);
   const lock = `${file}.lock`;
+  const lockToken = `${process.pid}:${randomBytes(8).toString('hex')}`;
   const deadline = Date.now() + 2000;
   for (;;) {
     try {
-      writeFileSync(lock, `${process.pid}`, { flag: 'wx', mode: 0o600 });
+      writeFileSync(lock, lockToken, { flag: 'wx', mode: 0o600 });
       break;
-    } catch {
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
       try {
-        const owner = Number(readFileSync(lock, 'utf8'));
-        const stale = Date.now() - statSync(lock).mtimeMs > 5000;
-        let alive = true;
-        try { process.kill(owner, 0); } catch { alive = false; }
-        if (!alive || stale) { unlinkSync(lock); continue; }
-      } catch { try { unlinkSync(lock); } catch { /* another contender */ } }
+        const observed = readFileSync(lock, 'utf8');
+        const owner = Number(observed.split(':', 1)[0]);
+        const tooOld = Date.now() - statSync(lock).mtimeMs > 30_000;
+        let alive = Number.isInteger(owner) && owner > 0;
+        if (alive) { try { process.kill(owner, 0); } catch { alive = false; } }
+        if ((!alive || tooOld) && readFileSync(lock, 'utf8') === observed) {
+          try { unlinkSync(lock); } catch { /* another contender resolved it */ }
+          continue;
+        }
+      } catch { /* a partially observed lock is never safe to remove */ }
       if (Date.now() >= deadline) throw new Error(`Workspace registry lock timeout: ${lock}`);
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
     }
@@ -72,7 +78,7 @@ function updateWorkspaceRegistry(configDir: string, update: (records: WorkspaceR
     writeFileSync(temporary, JSON.stringify({ schemaVersion: 1, workspaces: records }, null, 2) + '\n', { mode: 0o600 });
     renameSync(temporary, file);
   } finally {
-    try { if (existsSync(lock)) unlinkSync(lock); } catch { /* best effort */ }
+    try { if (existsSync(lock) && readFileSync(lock, 'utf8') === lockToken) unlinkSync(lock); } catch { /* best effort */ }
   }
 }
 

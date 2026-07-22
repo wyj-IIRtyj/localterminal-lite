@@ -5,7 +5,7 @@
 ```text
 ChatGPT Apps / Actions
         |
-        | MCP or authenticated Actions facade
+        | direct low-risk MCP tools or authenticated Actions facade
         v
 +----------------------------- shared public host:port -----------------------------+
 | Cluster gateway (one elected leader process)                                      |
@@ -32,6 +32,7 @@ TUI
   App (rendering/composition)
     -> TuiController (use-case orchestration)
     -> workspace-selector (single workspace selector presenter)
+    -> renderer-profile (platform-specific terminal compatibility policy)
     -> runtime-settings (effective runtime settings snapshot)
     -> credential-visibility (fail-closed key lifecycle)
 ```
@@ -58,6 +59,18 @@ The passive-lock service is installation-global. It is not owned by one workspac
 
 One-shot helpers are workspace- and session-scoped. Terminal session completion, cancellation, controller cleanup, or runtime shutdown may terminate only helpers whose PID files and executable identity match that session.
 
+### Continuation and background tasks
+
+Actions continuation plans are optional durable session state. `off` preserves the core harness, `adaptive` stores 1-3 calls, `next-call` stores one, and `lookahead-3` stores three. Only a confirmed successful call advances a queue. Contract revisions are persisted; a mode/revision change emits `requirements_changed`, which discovery acknowledges after returning the new contract. Non-blocking scheduling is a separate default-off setting. When enabled, `ExtensionService` releases an operation after a 200ms response budget with a task ID, retains the live audit record, and completes or fails that same record when the operation settles. Completed responses expire after 30 minutes and are evicted oldest-first when either 100 retained tasks or 24 MiB of serialized responses is reached; a maintenance timer also enforces expiry while idle. Runtime shutdown stops accepting calls, aborts owned command trees, waits a bounded grace period, and closes remaining audits before releasing the workspace lease.
+
+History JSONL files use a sparse, stat-validated line index and bounded range reads. The TUI renders only the newest history window and directs users to paginated `session_history` for the complete record. Inbox reads default to a bounded page, preventing message observation from monopolizing the event loop.
+
+The renderer profile is capability-conservative on Windows: it does not infer safety from `WT_SESSION`, keeps main-screen rendering on the Bun thread at a bounded frame rate, disables Kitty keyboard negotiation, and defaults to keyboard-only input. `LITE_WINDOWS_TUI_MODE=mouse` changes only mouse capture for isolated compatibility testing. Page lists support arrows, `j/k`, paging, boundary jumps, and Enter, so mouse availability is never required for session operations.
+
+### Apps MCP surface and blobs
+
+Apps registers both the full execution/registration facade and direct tools for local session control, workspace/Git reads, messaging, polling, and content-addressed Blob staging. `extension_call` is the capability-complete path for arbitrary commands, overwriting writes, patches, and custom extensions; direct tools are schema-focused convenience paths and never replace it. Blob bytes live under the workspace runtime's private state directory and are addressed and verified by SHA-256. `blob_write_file` succeeds idempotently when an existing target has the same digest and rejects only content collisions; overwriting remains available through the generic facade.
+
 ### Diff subsystem
 
 Git is an optional workspace capability. The Diff tracker probes once and degrades safely for non-Git directories or missing Git. Every subprocess has a deadline and bounded output. Untracked files are sampled through bounded reads; binaries and oversized files are never loaded wholly into memory.
@@ -75,7 +88,7 @@ Credentials are hidden by default and may be visible only while eligible `v` pre
 | Domain/state | `store.ts`, `types.ts`, `tui-model.ts` | sessions, messages, events, journal/snapshot persistence, audit history |
 | Extension facade | `extensions.ts`, `core-tools.ts`, `mcp.ts`, `openapi.ts` | authenticated tool discovery, registration and calls |
 | Resource adapters | `session-resources.ts`, `diff.ts`, `security.ts`, `update.ts`, `update-transaction.ts` | OS helpers, Git sampling, path/credential safety, transactional updates |
-| TUI contracts/presentation | `tui/contracts.ts`, `tui/workspace-selector.ts`, `runtime-settings.ts`, `tui/credential-visibility.ts` | shared view models and interaction contracts |
+| TUI contracts/presentation | `tui/contracts.ts`, `tui/workspace-selector.ts`, `tui/renderer-profile.ts`, `runtime-settings.ts`, `tui/credential-visibility.ts` | shared view models, terminal profiles, and interaction contracts |
 | TUI orchestration/rendering | `tui/state.ts`, `tui/App.tsx`, screens/components | use cases and rendering |
 
 ## Required invariants
@@ -88,6 +101,8 @@ Credentials are hidden by default and may be visible only while eligible `v` pre
 6. Setup, startup selection, and Settings consume the same complete workspace selector model.
 7. Workspace-local state never escapes into another workspace and internal state is excluded from tools and Diff.
 8. Process and cluster status shown in the TUI comes from runtime topology, not static labels.
+9. An Actions continuation queue advances only after the exact planned call completes successfully.
+10. Narrow Apps tools marked non-destructive do not overwrite existing workspace files; the separately exposed generic facade retains explicit overwrite and arbitrary-command capabilities.
 
 ## Change guidance
 

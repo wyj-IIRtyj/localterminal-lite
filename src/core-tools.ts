@@ -1,12 +1,13 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { LiteConfig } from './types.js';
 import { LiteError, publicSession, type LiteStore } from './store.js';
 import { resolveWorkspacePath } from './security.js';
-import type { JsonObject, TaskPackage, ToolDefinition } from './types.js';
+import type { JsonObject, JsonSchema, TaskPackage, ToolDefinition } from './types.js';
 import { disarmSessionResources } from './session-resources.js';
+import { continuationPolicy } from './continuation.js';
 
 const IGNORED_DIRECTORIES = new Set(['.git', '.localterminal-lite', 'node_modules', 'dist', 'coverage', '.next', '.turbo']);
 
@@ -20,6 +21,7 @@ type CommandResult = {
   stderr: string;
   truncated: boolean;
   durationMs: number;
+  cancelled: boolean;
 };
 
 function asString(value: unknown, label: string): string {
@@ -36,6 +38,12 @@ function boundedOutput(value: string, max: number): { text: string; truncated: b
   return { text: `${value.slice(0, max)}\n… output truncated …`, truncated: true };
 }
 
+function decodeBlob(content: string, encoding: string): Buffer {
+  if (encoding === 'utf-8') return Buffer.from(content, 'utf8');
+  if (encoding !== 'base64' || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(content)) throw new Error('encoding must be utf-8 or content must be valid base64.');
+  return Buffer.from(content, 'base64');
+}
+
 async function runCommand(args: {
   executable: string;
   argv?: string[];
@@ -43,6 +51,8 @@ async function runCommand(args: {
   timeoutSec: number;
   maxOutputChars: number;
   env?: NodeJS.ProcessEnv;
+  signal?: AbortSignal;
+  displayCommand?: string;
 }): Promise<CommandResult> {
   const startedAt = Date.now();
   const child = spawn(args.executable, args.argv ?? [], {
@@ -50,26 +60,63 @@ async function runCommand(args: {
     env: args.env ?? process.env,
     stdio: ['ignore', 'pipe', 'pipe'],
     shell: false,
+    // A distinct Windows process group prevents forced timeout cleanup from
+    // disturbing the Runtime's own console/ConPTY association.
+    detached: true,
+    windowsHide: true,
   });
   let stdout = '';
   let stderr = '';
   let timedOut = false;
+  let cancelled = false;
+  let windowsTermination: Promise<void> | undefined;
   const captureLimit = args.maxOutputChars * 2;
   child.stdout.on('data', (chunk: Buffer) => { if (stdout.length < captureLimit) stdout += chunk.toString('utf8'); });
   child.stderr.on('data', (chunk: Buffer) => { if (stderr.length < captureLimit) stderr += chunk.toString('utf8'); });
-  const timer = setTimeout(() => {
-    timedOut = true;
-    child.kill('SIGTERM');
-    setTimeout(() => child.kill('SIGKILL'), 1_500).unref();
-  }, args.timeoutSec * 1000);
+  const terminate = (force: boolean) => {
+    if (!child.pid || child.exitCode !== null) return;
+    if (process.platform === 'win32') {
+      const killer = spawn('taskkill.exe', ['/pid', String(child.pid), '/t', ...(force ? ['/f'] : [])], { stdio: 'ignore', windowsHide: true });
+      windowsTermination ||= new Promise<void>((resolve) => {
+        killer.once('error', () => {
+          try { child.kill(force ? 'SIGKILL' : 'SIGTERM'); } catch { /* already exited */ }
+          resolve();
+        });
+        killer.once('close', () => resolve());
+      });
+      return;
+    }
+    try { process.kill(-child.pid, force ? 'SIGKILL' : 'SIGTERM'); }
+    catch { try { child.kill(force ? 'SIGKILL' : 'SIGTERM'); } catch { /* already exited */ } }
+  };
+  let forceTimer: ReturnType<typeof setTimeout> | undefined;
+  const requestStop = (reason: 'timeout' | 'cancel') => {
+    if (reason === 'timeout') timedOut = true; else cancelled = true;
+    // Windows has no process-group signal equivalent. Non-forced taskkill can
+    // leave console descendants running until they finish naturally, so cancel
+    // the owned tree atomically. POSIX retains a short graceful period.
+    terminate(process.platform === 'win32');
+    if (process.platform !== 'win32') {
+      forceTimer ||= setTimeout(() => terminate(true), 1_500);
+      forceTimer.unref();
+    }
+  };
+  const timer = setTimeout(() => requestStop('timeout'), args.timeoutSec * 1000);
+  const abort = () => requestStop('cancel');
+  if (args.signal?.aborted) abort(); else args.signal?.addEventListener('abort', abort, { once: true });
   const result = await new Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
     child.once('error', reject);
     child.once('close', (exitCode, signal) => resolve({ exitCode, signal }));
-  }).finally(() => clearTimeout(timer));
+  }).finally(() => {
+    clearTimeout(timer);
+    if (forceTimer) clearTimeout(forceTimer);
+    args.signal?.removeEventListener('abort', abort);
+  });
+  if (windowsTermination) await windowsTermination;
   const boundedStdout = boundedOutput(stdout, args.maxOutputChars);
   const boundedStderr = boundedOutput(stderr, args.maxOutputChars);
   return {
-    command: [args.executable, ...(args.argv ?? [])].join(' '),
+    command: args.displayCommand ?? [args.executable, ...(args.argv ?? [])].join(' '),
     cwd: args.cwd,
     exitCode: result.exitCode,
     signal: result.signal,
@@ -78,7 +125,50 @@ async function runCommand(args: {
     stderr: boundedStderr.text,
     truncated: boundedStdout.truncated || boundedStderr.truncated,
     durationMs: Date.now() - startedAt,
+    cancelled,
   };
+}
+
+async function runShellCommand(args: {
+  command: string;
+  cwd: string;
+  stateDir: string;
+  timeoutSec: number;
+  maxOutputChars: number;
+  signal?: AbortSignal;
+}): Promise<CommandResult> {
+  if (process.platform !== 'win32') {
+    return runCommand({
+      executable: process.env.SHELL || '/bin/sh',
+      argv: ['-lc', args.command],
+      cwd: args.cwd,
+      timeoutSec: args.timeoutSec,
+      maxOutputChars: args.maxOutputChars,
+      signal: args.signal,
+      displayCommand: args.command,
+    });
+  }
+
+  // Passing nested quotes through Bun -> CreateProcess -> cmd.exe /s /c can
+  // change their meaning. A private one-shot batch file gives cmd exactly the
+  // user command and also provides one stable process-tree root for timeout.
+  const commandDir = path.join(args.stateDir, 'command-tasks', randomUUID());
+  const commandFile = path.join(commandDir, 'run.cmd');
+  await mkdir(commandDir, { recursive: true });
+  await writeFile(commandFile, `@echo off\r\n${args.command}\r\n`, 'utf8');
+  try {
+    return await runCommand({
+      executable: process.env.ComSpec || 'cmd.exe',
+      argv: ['/d', '/q', '/c', commandFile],
+      cwd: args.cwd,
+      timeoutSec: args.timeoutSec,
+      maxOutputChars: args.maxOutputChars,
+      signal: args.signal,
+      displayCommand: args.command,
+    });
+  } finally {
+    await rm(commandDir, { recursive: true, force: true });
+  }
 }
 
 function relative(config: LiteConfig, absolute: string): string {
@@ -108,6 +198,7 @@ export function createBuiltinTools(config: LiteConfig, store: LiteStore): Map<st
   const add = (definition: ToolDefinition) => tools.set(definition.name, definition);
   const readOnly = { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true };
   const mutating = { readOnlyHint: false, destructiveHint: true, openWorldHint: false, idempotentHint: false };
+  const localCreate = { readOnlyHint: false, destructiveHint: false, openWorldHint: false, idempotentHint: true };
   const actor = (context: Parameters<ToolDefinition['invoke']>[1]) => {
     if (!context.authenticatedSession) throw new LiteError('IDENTITY_REQUIRED', 'Register or inherit a Lite session before calling this tool.');
     return context.authenticatedSession;
@@ -116,12 +207,12 @@ export function createBuiltinTools(config: LiteConfig, store: LiteStore): Map<st
   add({
     name: 'workspace_info', title: 'Workspace info', description: 'Inspect the single authorized workspace and Lite runtime.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false }, annotations: readOnly,
-    invoke: async () => ({ workspaceDir: config.workspaceDir, platform: process.platform, node: process.version, stateRevision: store.snapshot().revision }),
+    invoke: async () => ({ workspaceDir: config.workspaceDir, platform: process.platform, node: process.version, stateRevision: store.revision() }),
   });
   add({
     name: 'list_dir', title: 'List directory', description: 'List one directory inside the authorized workspace.',
     inputSchema: { type: 'object', properties: { path: { type: 'string', default: '.' } }, additionalProperties: false }, annotations: readOnly,
-    invoke: async (input) => {
+    invoke: async (input, context) => {
       const directory = resolveWorkspacePath(config.workspaceDir, config.stateDir, asOptionalString(input.path) || '.');
       const entries = await readdir(directory, { withFileTypes: true });
       return { path: relative(config, directory), entries: entries.filter((entry) => !IGNORED_DIRECTORIES.has(entry.name)).slice(0, 500).map((entry) => ({ name: entry.name, type: entry.isDirectory() ? 'directory' : entry.isFile() ? 'file' : 'other' })), truncated: entries.length > 500 };
@@ -220,14 +311,60 @@ export function createBuiltinTools(config: LiteConfig, store: LiteStore): Map<st
     },
   });
   add({
+    name: 'blob_create', title: 'Create local blob', description: 'Store UTF-8 or base64 content in a local content-addressed staging blob without changing workspace files or contacting external services.',
+    inputSchema: { type: 'object', properties: { content: { type: 'string', maxLength: 1_400_000 }, encoding: { type: 'string', enum: ['utf-8', 'base64'], default: 'utf-8' } }, required: ['content'], additionalProperties: false }, annotations: localCreate,
+    invoke: async (input) => {
+      const buffer = decodeBlob(asString(input.content, 'content'), asOptionalString(input.encoding) || 'utf-8');
+      if (buffer.length > 1_000_000) throw new Error('Decoded blob content must not exceed 1,000,000 bytes.');
+      const sha256 = createHash('sha256').update(buffer).digest('hex');
+      const directory = path.join(config.stateDir, 'blobs');
+      const file = path.join(directory, sha256);
+      await mkdir(directory, { recursive: true, mode: 0o700 });
+      try { await writeFile(file, buffer, { flag: 'wx', mode: 0o600 }); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+      return { sha256, bytes: buffer.length, encoding: input.encoding === 'base64' ? 'base64' : 'utf-8', staged: true };
+    },
+  });
+  add({
+    name: 'blob_read', title: 'Read local blob', description: 'Read bounded content from a previously staged local blob without changing files.',
+    inputSchema: { type: 'object', properties: { sha256: { type: 'string', minLength: 64, maxLength: 64 }, encoding: { type: 'string', enum: ['utf-8', 'base64'], default: 'utf-8' }, maxBytes: { type: 'integer', minimum: 1, maximum: 1_000_000 } }, required: ['sha256'], additionalProperties: false }, annotations: readOnly,
+    invoke: async (input) => {
+      const sha256 = asString(input.sha256, 'sha256');
+      if (!/^[a-f0-9]{64}$/.test(sha256)) throw new Error('sha256 must contain 64 lowercase hexadecimal characters.');
+      const buffer = await readFile(path.join(config.stateDir, 'blobs', sha256));
+      const maxBytes = typeof input.maxBytes === 'number' ? input.maxBytes : 256_000;
+      const bounded = buffer.subarray(0, maxBytes);
+      return { sha256, bytes: buffer.length, truncated: buffer.length > maxBytes, encoding: input.encoding === 'base64' ? 'base64' : 'utf-8', content: input.encoding === 'base64' ? bounded.toString('base64') : bounded.toString('utf8') };
+    },
+  });
+  add({
+    name: 'blob_write_file', title: 'Create file from blob', description: 'Create a workspace file from a staged blob. Repeating the same content succeeds; different existing content is never overwritten.',
+    inputSchema: { type: 'object', properties: { sha256: { type: 'string', minLength: 64, maxLength: 64 }, path: { type: 'string', minLength: 1 }, createParents: { type: 'boolean', default: false } }, required: ['sha256', 'path'], additionalProperties: false }, annotations: localCreate,
+    invoke: async (input) => {
+      const sha256 = asString(input.sha256, 'sha256');
+      if (!/^[a-f0-9]{64}$/.test(sha256)) throw new Error('sha256 must contain 64 lowercase hexadecimal characters.');
+      const buffer = await readFile(path.join(config.stateDir, 'blobs', sha256));
+      if (createHash('sha256').update(buffer).digest('hex') !== sha256) throw new Error('Staged blob integrity check failed.');
+      const file = resolveWorkspacePath(config.workspaceDir, config.stateDir, asString(input.path, 'path'));
+      if (input.createParents) await mkdir(path.dirname(file), { recursive: true });
+      try { await writeFile(file, buffer, { flag: 'wx' }); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        const existing = await readFile(file);
+        const existingSha256 = createHash('sha256').update(existing).digest('hex');
+        if (existingSha256 !== sha256) throw new Error('Target file already exists with different content; blob_write_file never overwrites files.');
+        return { path: relative(config, file), bytes: existing.length, sha256, alreadyExisted: true };
+      }
+      return { path: relative(config, file), bytes: buffer.length, sha256, alreadyExisted: false };
+    },
+  });
+  add({
     name: 'execute_cli', title: 'Execute command', description: 'Execute one bounded shell command in the workspace.',
     inputSchema: { type: 'object', properties: { command: { type: 'string', minLength: 1, maxLength: 20_000 }, cwd: { type: 'string' }, timeoutSec: { type: 'integer', minimum: 1, maximum: 3600 } }, required: ['command'], additionalProperties: false },
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true, idempotentHint: false },
-    invoke: async (input) => {
+    invoke: async (input, context) => {
       const cwd = resolveWorkspacePath(config.workspaceDir, config.stateDir, asOptionalString(input.cwd) || '.');
-      const shell = process.env.SHELL || (process.platform === 'win32' ? 'cmd.exe' : '/bin/sh');
-      const argv = process.platform === 'win32' ? ['/d', '/s', '/c', asString(input.command, 'command')] : ['-lc', asString(input.command, 'command')];
-      return await runCommand({ executable: shell, argv, cwd, timeoutSec: typeof input.timeoutSec === 'number' ? input.timeoutSec : config.commandTimeoutSec, maxOutputChars: config.maxOutputChars }) as unknown as JsonObject;
+      return await runShellCommand({ command: asString(input.command, 'command'), cwd, stateDir: config.stateDir, timeoutSec: typeof input.timeoutSec === 'number' ? input.timeoutSec : config.commandTimeoutSec, maxOutputChars: config.maxOutputChars, signal: context.signal }) as unknown as JsonObject;
     },
   });
 
@@ -239,28 +376,28 @@ export function createBuiltinTools(config: LiteConfig, store: LiteStore): Map<st
     add({
       name: gitTool[0], title: gitTool[0].replace('_', ' '), description: `Run bounded ${gitTool[0]} in the workspace.`,
       inputSchema: { type: 'object', properties: { cwd: { type: 'string' } }, additionalProperties: false }, annotations: readOnly,
-      invoke: async (input) => await runCommand({ executable: 'git', argv: [...gitTool[1]], cwd: resolveWorkspacePath(config.workspaceDir, config.stateDir, asOptionalString(input.cwd) || '.'), timeoutSec: 30, maxOutputChars: config.maxOutputChars }) as unknown as JsonObject,
+      invoke: async (input, context) => await runCommand({ executable: 'git', argv: [...gitTool[1]], cwd: resolveWorkspacePath(config.workspaceDir, config.stateDir, asOptionalString(input.cwd) || '.'), timeoutSec: 30, maxOutputChars: config.maxOutputChars, signal: context.signal }) as unknown as JsonObject,
     });
   }
   add({
     name: 'git_show', title: 'Git show', description: 'Show one bounded Git revision or object.',
     inputSchema: { type: 'object', properties: { revision: { type: 'string', minLength: 1 }, cwd: { type: 'string' } }, required: ['revision'], additionalProperties: false }, annotations: readOnly,
-    invoke: async (input) => {
+    invoke: async (input, context) => {
       const revision = asString(input.revision, 'revision');
       if (!/^[A-Za-z0-9_./~^{}:@+-]+$/.test(revision)) throw new Error('Unsafe Git revision syntax.');
-      return await runCommand({ executable: 'git', argv: ['show', '--stat', '--oneline', revision], cwd: resolveWorkspacePath(config.workspaceDir, config.stateDir, asOptionalString(input.cwd) || '.'), timeoutSec: 30, maxOutputChars: config.maxOutputChars }) as unknown as JsonObject;
+      return await runCommand({ executable: 'git', argv: ['show', '--stat', '--oneline', revision], cwd: resolveWorkspacePath(config.workspaceDir, config.stateDir, asOptionalString(input.cwd) || '.'), timeoutSec: 30, maxOutputChars: config.maxOutputChars, signal: context.signal }) as unknown as JsonObject;
     },
   });
   add({
     name: 'run_checks', title: 'Run project checks', description: 'Run declared typecheck, build, and test package scripts in order.',
     inputSchema: { type: 'object', properties: { includeTest: { type: 'boolean', default: true }, cwd: { type: 'string' } }, additionalProperties: false }, annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true, idempotentHint: false },
-    invoke: async (input) => {
+    invoke: async (input, context) => {
       const cwd = resolveWorkspacePath(config.workspaceDir, config.stateDir, asOptionalString(input.cwd) || '.');
       const pkg = JSON.parse(await readFile(path.join(cwd, 'package.json'), 'utf8')) as { scripts?: Record<string, string> };
       const names = ['typecheck', 'build', ...(input.includeTest === false ? [] : ['test'])].filter((name) => pkg.scripts?.[name]);
       const results: JsonObject[] = [];
       for (const name of names) {
-        const result = await runCommand({ executable: process.platform === 'win32' ? 'npm.cmd' : 'npm', argv: ['run', name], cwd, timeoutSec: Math.max(config.commandTimeoutSec, 300), maxOutputChars: config.maxOutputChars });
+        const result = await runCommand({ executable: process.platform === 'win32' ? (process.env.ComSpec || 'cmd.exe') : 'npm', argv: process.platform === 'win32' ? ['/d', '/s', '/c', `npm run ${name}`] : ['run', name], cwd, timeoutSec: Math.max(config.commandTimeoutSec, 300), maxOutputChars: config.maxOutputChars, signal: context.signal });
         results.push({ name, ...result });
         if (result.exitCode !== 0) break;
       }
@@ -280,7 +417,7 @@ export function createBuiltinTools(config: LiteConfig, store: LiteStore): Map<st
         mode: { type: 'string', enum: ['root', 'delegate'], default: 'root' }, name: { type: 'string', minLength: 1, maxLength: 80 }, role: { type: 'string', maxLength: 80 },
         continuesSessionId: { type: 'string' }, task: { type: 'object', properties: taskProperties, required: ['objective', 'background', 'deliverables', 'acceptanceCriteria', 'constraints'], additionalProperties: false },
       }, required: ['mode', 'name'], additionalProperties: false,
-    }, annotations: mutating,
+    }, annotations: localCreate,
     invoke: async (input, context) => {
       const mode = input.mode === 'delegate' ? 'delegate' : 'root';
       if (mode === 'root') {
@@ -295,7 +432,7 @@ export function createBuiltinTools(config: LiteConfig, store: LiteStore): Map<st
   });
   add({
     name: 'session_inherit', title: 'Inherit session', description: 'Claim unfinished work. Use claimCode for handoff/released/revoked sessions, or the previous sessionToken to reclaim the same stale session after an interrupted ChatGPT run.',
-    inputSchema: { type: 'object', properties: { sessionId: { type: 'string', minLength: 1 }, claimCode: { type: 'string', minLength: 1 }, sessionToken: { type: 'string', minLength: 1 } }, required: ['sessionId'], additionalProperties: false }, annotations: mutating,
+    inputSchema: { type: 'object', properties: { sessionId: { type: 'string', minLength: 1 }, claimCode: { type: 'string', minLength: 1 }, sessionToken: { type: 'string', minLength: 1 } }, required: ['sessionId'], additionalProperties: false }, annotations: localCreate,
     invoke: async (input) => {
       const claimCode = asOptionalString(input.claimCode);
       const sessionToken = asOptionalString(input.sessionToken);
@@ -309,11 +446,24 @@ export function createBuiltinTools(config: LiteConfig, store: LiteStore): Map<st
     inputSchema: { type: 'object', properties: {}, additionalProperties: false }, annotations: readOnly,
     invoke: async (_input, context) => { actor(context); return { sessions: store.listSessions().map(publicSession) }; },
   });
+  const plannedCall: JsonSchema = { type: 'object', properties: { tool: { type: 'string', minLength: 3, maxLength: 64 }, input: { type: 'object', additionalProperties: true }, purpose: { type: 'string', minLength: 1, maxLength: 500 } }, required: ['tool', 'input'], additionalProperties: false };
   add({
-    name: 'session_checkpoint', title: 'Checkpoint session', description: 'Record the required end-of-turn summary and phase. This must be the final LocalTerminal call of every work turn. Root completion is blocked until every direct child is terminal and all child messages/events are reviewed.',
-    inputSchema: { type: 'object', properties: { phase: { type: 'string', enum: ['pending', 'working', 'waiting', 'blocked', 'completed', 'cancelled'] }, summary: { type: 'string', minLength: 1, maxLength: 4000 }, nextSteps: stringList, blockers: stringList, artifacts: stringList, milestone: { type: 'string', maxLength: 1000 }, tags: stringList }, required: ['phase', 'summary'], additionalProperties: false }, annotations: mutating,
+    name: 'session_checkpoint', title: 'Checkpoint session', description: 'Record durable session state. When the optional enhanced Actions long-task harness is enabled, a working checkpoint requires 1-3 exact concrete nextCalls and the returned nextCall must run immediately.',
+    inputSchema: { type: 'object', properties: { phase: { type: 'string', enum: ['pending', 'working', 'waiting', 'blocked', 'completed', 'cancelled'] }, summary: { type: 'string', minLength: 1, maxLength: 4000 }, nextSteps: stringList, blockers: stringList, artifacts: stringList, milestone: { type: 'string', maxLength: 1000 }, tags: stringList, nextCalls: { type: 'array', minItems: 1, maxItems: 3, items: plannedCall }, replanReason: { type: 'string', minLength: 1, maxLength: 1000 } }, required: ['phase', 'summary'], additionalProperties: false }, annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false, idempotentHint: false },
     invoke: async (input, context) => {
       const current = actor(context);
+      if (context.transport === 'actions' && input.phase === 'working') {
+        const policy = continuationPolicy(config.actionsContinuationMode);
+        const count = Array.isArray(input.nextCalls) ? input.nextCalls.length : 0;
+        if (policy.enabled && (count < policy.minCalls || count > policy.maxCalls)) {
+          const expected = policy.exactCalls ? `exactly ${policy.exactCalls}` : `${policy.minCalls}-${policy.maxCalls}`;
+          throw new LiteError('CONTINUATION_PLAN_REQUIRED', `Actions ${config.actionsContinuationMode} mode requires ${expected} nextCalls on every working checkpoint.`, {
+            continuationMode: config.actionsContinuationMode, minCalls: policy.minCalls, maxCalls: policy.maxCalls,
+            ...(policy.exactCalls ? { requiredCount: policy.exactCalls } : {}), mustContinue: true, userFacingFinalProhibited: true,
+            example: { phase: 'working', summary: 'Continue the active task.', nextCalls: Array.from({ length: policy.exactCalls ?? 1 }, () => ({ tool: 'workspace_info', input: {}, purpose: 'Execute the next concrete step.' })) },
+          });
+        }
+      }
       const session = store.checkpoint(current.id, input);
       if (session.phase === 'completed' || session.phase === 'cancelled') disarmSessionResources(config, current.id);
       return { session: publicSession(session) };
@@ -331,32 +481,32 @@ export function createBuiltinTools(config: LiteConfig, store: LiteStore): Map<st
   });
   add({
     name: 'session_release', title: 'Release session', description: 'Release the current controller and issue a new one-time handoff code.',
-    inputSchema: { type: 'object', properties: {}, additionalProperties: false }, annotations: mutating,
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false }, annotations: localCreate,
     invoke: async (_input, context) => { const result = store.release(actor(context).id); return { session: publicSession(result.session), claimCode: result.claimCode, handoffPrompt: result.handoffPrompt }; },
   });
   add({
     name: 'session_unregister', title: 'Release session (deprecated)', description: 'Compatibility alias for session_release. It never deletes history.',
-    inputSchema: { type: 'object', properties: { session: { type: 'string' } }, additionalProperties: false }, annotations: mutating,
+    inputSchema: { type: 'object', properties: { session: { type: 'string' } }, additionalProperties: false }, annotations: localCreate,
     invoke: async (_input, context) => { const result = store.release(actor(context).id); return { deprecated: true, replacement: 'session_release', removed: false, session: publicSession(result.session), claimCode: result.claimCode, handoffPrompt: result.handoffPrompt }; },
   });
   add({
     name: 'session_tag', title: 'Tag session', description: 'Append audit-friendly tags to the authenticated session.',
-    inputSchema: { type: 'object', properties: { tags: { ...stringList, minItems: 1 } }, required: ['tags'], additionalProperties: false }, annotations: mutating,
+    inputSchema: { type: 'object', properties: { tags: { ...stringList, minItems: 1 } }, required: ['tags'], additionalProperties: false }, annotations: localCreate,
     invoke: async (input, context) => ({ session: publicSession(store.tag(actor(context).id, input.tags as string[])) }),
   });
   add({
     name: 'session_subscribe', title: 'Subscribe to session', description: 'Subscribe the authenticated session to another session’s key progress.',
-    inputSchema: { type: 'object', properties: { targetSessionId: { type: 'string', minLength: 1 } }, required: ['targetSessionId'], additionalProperties: false }, annotations: mutating,
+    inputSchema: { type: 'object', properties: { targetSessionId: { type: 'string', minLength: 1 } }, required: ['targetSessionId'], additionalProperties: false }, annotations: localCreate,
     invoke: async (input, context) => { const current = actor(context); store.subscribe(current.id, asString(input.targetSessionId, 'targetSessionId')); return { subscribed: true, subscriberSessionId: current.id, targetSessionId: input.targetSessionId }; },
   });
   add({
     name: 'session_events_ack', title: 'Acknowledge events', description: 'Acknowledge delivered event IDs; history remains permanent.',
-    inputSchema: { type: 'object', properties: { eventIds: { ...stringList, minItems: 1, maxItems: 100 } }, required: ['eventIds'], additionalProperties: false }, annotations: mutating,
+    inputSchema: { type: 'object', properties: { eventIds: { ...stringList, minItems: 1, maxItems: 100 } }, required: ['eventIds'], additionalProperties: false }, annotations: localCreate,
     invoke: async (input, context) => ({ acknowledged: store.acknowledgeEvents(actor(context).id, input.eventIds as string[]) }),
   });
   add({
     name: 'message_send', title: 'Send session message', description: 'Send a durable message as the authenticated session to a recipient session name or ID; sender cannot be overridden. The response includes send/return timestamps and call latency.',
-    inputSchema: { type: 'object', properties: { to: { type: 'string', minLength: 1 }, body: { type: 'string', minLength: 1, maxLength: 20_000 } }, required: ['to', 'body'], additionalProperties: false }, annotations: mutating,
+    inputSchema: { type: 'object', properties: { to: { type: 'string', minLength: 1 }, body: { type: 'string', minLength: 1, maxLength: 20_000 } }, required: ['to', 'body'], additionalProperties: false }, annotations: localCreate,
     invoke: async (input, context) => {
       const startedAt = new Date().toISOString();
       const message = store.sendMessage(actor(context).id, asString(input.to, 'to'), asString(input.body, 'body'));
@@ -366,8 +516,8 @@ export function createBuiltinTools(config: LiteConfig, store: LiteStore): Map<st
   });
   add({
     name: 'message_inbox', title: 'Read session inbox', description: 'Read only the authenticated session’s durable inbox.',
-    inputSchema: { type: 'object', properties: { markRead: { type: 'boolean', default: false } }, additionalProperties: false }, annotations: { ...readOnly, readOnlyHint: false },
-    invoke: async (input, context) => { const current = actor(context); const messages = store.inbox(current.id, input.markRead === true); return { session: publicSession(current), messages, observations: store.observeMessages(messages) }; },
+    inputSchema: { type: 'object', properties: { markRead: { type: 'boolean', default: false }, offset: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 200, default: 50 } }, additionalProperties: false }, annotations: { ...readOnly, readOnlyHint: false },
+    invoke: async (input, context) => { const current = actor(context); const page = store.inboxPage(current.id, input.markRead === true, typeof input.offset === 'number' ? input.offset : undefined, typeof input.limit === 'number' ? input.limit : 50); return { session: publicSession(current), ...page, observations: store.observeMessages(page.messages) }; },
   });
   add({
     name: 'message_list', title: 'List own collaboration messages', description: 'List recent inbound and outbound messages involving the authenticated session.',

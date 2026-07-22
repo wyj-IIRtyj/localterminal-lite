@@ -127,7 +127,7 @@ export class TuiController {
   snapshot(): TuiSnapshot {
     const revision = this.renderRevision();
     if (this.snapshotCache?.revision === revision) return this.snapshotCache.snapshot;
-    const snapshot = { state: this.currentRuntime.store.snapshot(), diff: this.diff.snapshot(), logs: [...this.currentRuntime.logs], runtime: this.currentRuntime, update: { ...this.update } };
+    const snapshot = { state: this.currentRuntime.store.snapshotForTui(), diff: this.diff.snapshot(), logs: [...this.currentRuntime.logs], runtime: this.currentRuntime, update: { ...this.update } };
     this.snapshotCache = { revision, snapshot };
     return snapshot;
   }
@@ -352,11 +352,11 @@ export class TuiController {
       : /armed|arming|visible_waiting_for_arm/.test(passiveStatus.state)
         ? 'arm'
         : 'standby';
-    const settingFields = ['language', 'theme', 'workspace', 'host', 'port', 'public-url', 'max-output', 'timeout', 'passive-lock'];
+    const settingFields = ['language', 'theme', 'workspace', 'host', 'port', 'public-url', 'max-output', 'timeout', 'actions-continuation', 'non-blocking-tasks', 'passive-lock'];
     const selection = await ask([{ label: this.text('Choose settings to edit', '选择要修改的设置'), options: settingFields, multiSelect: true }], [
       this.text('Edit only the settings you choose.', '只修改你选择的设置；未选择的项目保持不变。'),
       this.text('Available fields:', '可选字段：'),
-      'language, theme, workspace, host, port, public-url, max-output, timeout, passive-lock',
+      'language, theme, workspace, host, port, public-url, max-output, timeout, actions-continuation, non-blocking-tasks, passive-lock',
     ]);
     if (!selection?.[0]) return;
     const fields = [...new Set(selection[0].split(',').map((item) => item.trim().toLowerCase()).filter(Boolean))];
@@ -376,6 +376,8 @@ export class TuiController {
       else if (field === 'public-url') questions.push({ label: this.text('Public HTTPS URL (local clears)', '公网 HTTPS URL（local 清空）'), fallback: current.publicBaseUrl || 'local', validate: (value) => value.toLowerCase() === 'local' || isValidPublicBaseUrl(value.replace(/\/$/, '')) ? undefined : this.text('Use HTTPS; localhost may use HTTP.', '请使用 HTTPS；localhost 可使用 HTTP。') });
       else if (field === 'max-output') questions.push({ label: this.text('Maximum output characters', '最大输出字符'), fallback: String(current.maxOutputChars), validate: (value) => { const number = Number(value); return Number.isInteger(number) && number >= 4000 && number <= 1000000 ? undefined : this.text('Use an integer from 4000 to 1000000.', '请输入 4000 到 1000000 的整数。'); } });
       else if (field === 'timeout') questions.push({ label: this.text('Command timeout seconds', '命令超时秒数'), fallback: String(current.commandTimeoutSec), validate: (value) => { const number = Number(value); return Number.isInteger(number) && number >= 1 && number <= 3600 ? undefined : this.text('Use an integer from 1 to 3600.', '请输入 1 到 3600 的整数。'); } });
+      else if (field === 'actions-continuation') questions.push({ label: this.text('Long-task harness', '长任务 Harness'), fallback: current.actionsContinuationMode, options: ['off', 'adaptive', 'next-call', 'lookahead-3'] });
+      else if (field === 'non-blocking-tasks') questions.push({ label: this.text('Non-blocking tasks', '非阻塞任务'), fallback: current.nonBlockingTasksEnabled ? 'on' : 'off', options: ['off', 'on'] });
       else if (field === 'passive-lock') questions.push({ label: this.text('macOS passive lock', 'macOS 被动锁屏'), fallback: passiveFallback, options: ['off', 'arm', 'standby'] });
     }
     const answers = await ask(questions, [this.text(`Editing: ${fields.join(', ')}`, `正在修改：${fields.join(', ')}`)]);
@@ -413,6 +415,8 @@ export class TuiController {
       else if (field === 'public-url') next.publicBaseUrl = value.toLowerCase() === 'local' ? '' : value.replace(/\/$/, '');
       else if (field === 'max-output') next.maxOutputChars = integer(value, current.maxOutputChars);
       else if (field === 'timeout') next.commandTimeoutSec = integer(value, current.commandTimeoutSec);
+      else if (field === 'actions-continuation') next.actionsContinuationMode = value as LiteSettings['actionsContinuationMode'];
+      else if (field === 'non-blocking-tasks') next.nonBlockingTasksEnabled = value === 'on';
       else if (field === 'passive-lock') { passiveAction = value.toLowerCase() as 'off' | 'arm' | 'standby'; next.passiveLockEnabled = passiveAction !== 'off'; }
     });
     if (process.platform !== 'darwin' && passiveAction && passiveAction !== 'off') {
@@ -471,7 +475,7 @@ export class TuiController {
 
   private async deleteSession(session: LiteSession, ask: Ask): Promise<void> {
     const descendants = this.currentRuntime.store.listSessions().filter((item) => item.parentSessionId === session.id);
-    const historyCount = this.currentRuntime.store.historiesForTui([session.id, ...descendants.map((item) => item.id)]).length;
+    const historyCount = [session.id, ...descendants.map((item) => item.id)].reduce((sum, id) => sum + this.currentRuntime.store.historyCount(id), 0);
     const messages = this.currentRuntime.store.messagesForSession(session.id, 1000).length;
     const phrase = `DELETE ${session.id}`;
     const answer = await ask([{ label: `${this.text('Type to confirm', '输入确认短语')} “${phrase}”` }], [

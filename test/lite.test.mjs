@@ -8,6 +8,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { act, createElement } from 'react';
 import { testRender } from '@opentui/react/test-utils';
 import { LiteRuntime } from '../dist/server.js';
+import { ExtensionService } from '../dist/extensions.js';
 import { LiteStore, SESSION_TIMING } from '../dist/store.js';
 import { WorkspaceDiffTracker } from '../dist/diff.js';
 import { conversationGroups, logicalSessionGroups, selectedViewport } from '../dist/tui-model.js';
@@ -24,6 +25,7 @@ import { runtimeSettingsSnapshot } from '../dist/runtime-settings.js';
 import { buildWorkspaceSelectorModel } from '../dist/tui/workspace-selector.js';
 import { WorkspaceCatalog } from '../dist/workspace-catalog.js';
 import { nextCredentialVisibility } from '../dist/tui/credential-visibility.js';
+import { rendererProfile, windowsTuiMode } from '../dist/tui/renderer-profile.js';
 
 const CONNECTOR_KEY = 'test-connector-key-1234567890';
 const ACTIONS_TOKEN = 'test-actions-token-12345678901234567890';
@@ -36,9 +38,9 @@ function tempWorkspace() {
   return { workspaceDir, stateDir };
 }
 
-async function createRuntime() {
+async function createRuntime(overrides = {}) {
   const dirs = tempWorkspace();
-  const runtime = new LiteRuntime({ ...dirs, settingsPath: path.join(dirs.stateDir, 'test-settings.json'), host: '127.0.0.1', port: 0, connectorKey: CONNECTOR_KEY, actionsToken: ACTIONS_TOKEN, publicBaseUrl: 'http://127.0.0.1:0', maxOutputChars: 20_000, commandTimeoutSec: 10, uiLanguage: 'zh-CN', uiTheme: 'dark' });
+  const runtime = new LiteRuntime({ ...dirs, settingsPath: path.join(dirs.stateDir, 'test-settings.json'), host: '127.0.0.1', port: 0, connectorKey: CONNECTOR_KEY, actionsToken: ACTIONS_TOKEN, publicBaseUrl: 'http://127.0.0.1:0', maxOutputChars: 20_000, commandTimeoutSec: 10, uiLanguage: 'zh-CN', uiTheme: 'dark', passiveLockEnabled: false, actionsContinuationMode: 'next-call', ...overrides });
   await runtime.start();
   return { runtime, dirs, baseUrl: `http://127.0.0.1:${runtime.port}`, async close() { await runtime.close(); fs.rmSync(dirs.workspaceDir, { recursive: true, force: true }); } };
 }
@@ -89,6 +91,40 @@ test('OpenTUI theme and structured session status colors stay deterministic', ()
   assert.equal(presenceColor(theme, { presence: 'stale' }), theme.bad);
 });
 
+test('Windows TUI defaults to a bounded keyboard-compatible renderer profile', () => {
+  const compatible = rendererProfile('win32', { WT_SESSION: 'terminal-host' });
+  assert.equal(windowsTuiMode({ WT_SESSION: 'terminal-host' }), 'compatible');
+  assert.deepEqual(compatible, {
+    useThread: false,
+    targetFps: 20,
+    maxFps: 20,
+    debounceDelay: 150,
+    screenMode: 'main-screen',
+    useMouse: false,
+    enableMouseMovement: false,
+    consoleMode: 'disabled',
+    useKittyKeyboard: null,
+  });
+
+  const mouse = rendererProfile('win32', { LITE_WINDOWS_TUI_MODE: 'mouse' });
+  assert.equal(windowsTuiMode({ LITE_WINDOWS_TUI_MODE: 'mouse' }), 'mouse');
+  assert.equal(mouse.useMouse, true);
+  assert.equal(mouse.useThread, false);
+  assert.equal(mouse.screenMode, 'main-screen');
+
+  const keymap = fs.readFileSync(path.join(process.cwd(), 'src/tui/keymap.ts'), 'utf8');
+  for (const key of ['down', 'up', 'pagedown', 'pageup', 'home', 'end', 'return']) {
+    assert.match(keymap, new RegExp(`key: '${key}'`));
+  }
+
+  const commands = fs.readFileSync(path.join(process.cwd(), 'src/core-tools.ts'), 'utf8');
+  assert.match(commands, /command-tasks/);
+  assert.match(commands, /displayCommand: args\.command/);
+  assert.match(commands, /detached: true/);
+  assert.match(commands, /if \(windowsTermination\) await windowsTermination/);
+  assert.doesNotMatch(commands, /\['\/d', '\/s', '\/c', asString\(input\.command/);
+});
+
 test('OpenTUI ScrollBox owns wheel scrolling and renderer selection without click leakage', async () => {
   let mouseUps = 0;
   const lines = Array.from({ length: 30 }, (_, index) => createElement('text', { key: index, wrapMode: 'word' }, `row ${String(index).padStart(2, '0')} selectable content`));
@@ -127,8 +163,8 @@ test('TUI settings persist outside workspace and placeholder environment values 
     assert.deepEqual(readLiteSettings(env), { ...settings, workspaceDir: fs.realpathSync(workspaceDir) });
     const config = loadLiteConfig(env); assert.equal(config.workspaceDir, fs.realpathSync(workspaceDir)); assert.equal(config.publicBaseUrl, 'http://127.0.0.1:3210');
     assert.equal(settingsPath(env), path.join(configDir, 'config.json')); assert.equal(fs.existsSync(path.join(workspaceDir, '.localterminal-lite', 'config.json')), false);
-    const legacy = { ...settings }; delete legacy.uiLanguage; delete legacy.uiTheme; delete legacy.passiveLockEnabled; fs.writeFileSync(settingsPath(env), JSON.stringify(legacy));
-    assert.equal(readLiteSettings(env).uiLanguage, 'zh-CN'); assert.equal(readLiteSettings(env).uiTheme, 'dark'); assert.equal(readLiteSettings(env).passiveLockEnabled, false);
+    const legacy = { ...settings }; delete legacy.uiLanguage; delete legacy.uiTheme; delete legacy.passiveLockEnabled; delete legacy.actionsContinuationMode; delete legacy.nonBlockingTasksEnabled; fs.writeFileSync(settingsPath(env), JSON.stringify(legacy));
+    assert.equal(readLiteSettings(env).uiLanguage, 'zh-CN'); assert.equal(readLiteSettings(env).uiTheme, 'dark'); assert.equal(readLiteSettings(env).passiveLockEnabled, false); assert.equal(readLiteSettings(env).actionsContinuationMode, 'off'); assert.equal(readLiteSettings(env).nonBlockingTasksEnabled, false);
   } finally { fs.rmSync(workspaceDir, { recursive: true, force: true }); fs.rmSync(configDir, { recursive: true, force: true }); }
 });
 
@@ -824,10 +860,69 @@ test('OpenAPI 3.1 exposes exactly three facade operations and concrete identity 
     assert.deepEqual(Object.keys(schema.paths).sort(), ['/actions/extensions/call', '/actions/extensions/discover', '/actions/extensions/register']);
     assert.deepEqual(Object.values(schema.paths).map((item) => item.post.operationId).sort(), ['extensionCall', 'extensionDiscover', 'extensionRegister']);
     assert.deepEqual(schema.components.schemas.SessionIdentity.required, ['sessionId', 'sessionToken']);
-    assert.equal(schema.components.schemas.ExtensionCallRequest.properties.identity.$ref, '#/components/schemas/SessionIdentity');
+    assert.deepEqual(schema.components.schemas.ExtensionCallRequest.properties.identity.anyOf, [{ $ref: '#/components/schemas/SessionIdentity' }, { type: 'null' }]);
+    assert.deepEqual(schema.components.schemas.ExtensionDiscoverRequest.properties.identity.anyOf, [{ $ref: '#/components/schemas/SessionIdentity' }, { type: 'null' }]);
+    assert.equal(schema.components.schemas.ExtensionRegisterRequest.properties.identity.$ref, '#/components/schemas/SessionIdentity');
     assert.equal(schema.components.schemas.ExtensionRegisterRequest.properties.spec.$ref, '#/components/schemas/ExtensionSpec');
     assert.equal(schema.components.schemas.ToolResponse.properties.events.maxItems, 5);
+    assert.equal(schema.components.schemas.ExtensionToolInput.properties.nextCalls.minItems, 1);
+    assert.equal(schema.components.schemas.ExtensionToolInput.properties.nextCalls.maxItems, 1);
+    assert.equal(schema.components.schemas.PlannedToolCall.required.includes('tool'), true);
+    assert.match(schema.paths['/actions/extensions/call'].post.description, /next-call/);
+    assert.match(schema.paths['/actions/extensions/call'].post.description, /200ms/);
     assert.deepEqual(await (await fetch(`${server.baseUrl}/openapi-3.1.json`)).json(), schema);
+  } finally { await server.close(); }
+});
+
+test('Actions bootstrap treats null identity as absent without weakening authenticated calls', async () => {
+  const server = await createRuntime();
+  try {
+    const anonymous = await action(server, 'discover', { includeSchemas: false, identity: null });
+    assert.equal(anonymous.status, 200);
+    assert.equal(anonymous.body.data.identityRequired, true);
+
+    const created = await action(server, 'call', {
+      tool: 'session_register',
+      input: { mode: 'root', name: 'null-bootstrap-root', role: 'lead' },
+      identity: null,
+    });
+    assert.equal(created.status, 200, JSON.stringify(created.body));
+    assert.equal(created.body.ok, true);
+    const identity = created.body.data.result.identity;
+
+    const emptyIdentity = await action(server, 'call', {
+      tool: 'session_register',
+      input: { mode: 'root', name: 'invalid-empty-identity', role: 'lead' },
+      identity: {},
+    });
+    assert.equal(emptyIdentity.status, 400);
+    assert.equal(emptyIdentity.body.error.code, 'INVALID_INPUT');
+
+    const ordinary = await action(server, 'call', { tool: 'workspace_info', input: {}, identity: null });
+    assert.equal(ordinary.status, 401);
+    assert.equal(ordinary.body.error.code, 'IDENTITY_REQUIRED');
+
+    const registry = await action(server, 'register', { action: 'remove', name: 'missing', identity: null });
+    assert.equal(registry.status, 401);
+    assert.equal(registry.body.error.code, 'IDENTITY_REQUIRED');
+
+    const unauthorizedDelegate = await action(server, 'call', {
+      tool: 'session_register',
+      input: { mode: 'delegate', name: 'unauthorized-worker', role: 'developer', task },
+      identity: null,
+    });
+    assert.equal(unauthorizedDelegate.status, 401);
+    assert.equal(unauthorizedDelegate.body.error.code, 'IDENTITY_REQUIRED');
+
+    const delegated = await call(server, 'session_register', { mode: 'delegate', name: 'null-inherit-worker', role: 'developer', task }, identity);
+    assert.equal(delegated.body.ok, true, JSON.stringify(delegated.body));
+    const inherited = await action(server, 'call', {
+      tool: 'session_inherit',
+      input: { sessionId: delegated.body.data.result.session.id, claimCode: delegated.body.data.result.claimCode },
+      identity: null,
+    });
+    assert.equal(inherited.status, 200, JSON.stringify(inherited.body));
+    assert.equal(inherited.body.ok, true);
   } finally { await server.close(); }
 });
 
@@ -1043,6 +1138,10 @@ test('events cap at five, persist until ACK, subscriptions deliver milestones, a
     assert.equal(store.snapshot().messages.length, 5100);
     const reloaded = new LiteStore(dirs.stateDir);
     assert.equal(reloaded.snapshot().messages.length, 5100);
+    const inboxPage = reloaded.inboxPage(observer.session.id);
+    assert.equal(inboxPage.total, 5100);
+    assert.equal(inboxPage.messages.length, 50);
+    assert.equal(inboxPage.messages.at(-1).body, 'message-5099');
     assert.equal(reloaded.pendingEvents(observer.session.id).length, 5);
     assert.equal(reloaded.revision(), store.revision());
   } finally { fs.rmSync(dirs.workspaceDir, { recursive: true, force: true }); }
@@ -1061,31 +1160,269 @@ test('v1 state migrates to v2 with stale roots and durable history; context stay
   } finally { fs.rmSync(dirs.workspaceDir, { recursive: true, force: true }); }
 });
 
-test('Apps exposes only three tools and binds openai/session only after explicit verified identity', async () => {
+test('Actions next-call mode rejects stopping and enforces the exact post-checkpoint call', async () => {
+  const server = await createRuntime({ actionsContinuationMode: 'next-call' });
+  try {
+    const created = await root(server, 'next-call-mode');
+    const identity = created.identity;
+    const missing = await call(server, 'session_checkpoint', { phase: 'working', summary: 'Still working.' }, identity);
+    assert.equal(missing.body.error.code, 'CONTINUATION_PLAN_REQUIRED');
+    assert.equal(missing.body.error.details.requiredCount, 1);
+    assert.equal(missing.body.error.details.example.nextCalls[0].tool, 'workspace_info');
+    assert.deepEqual(missing.body.error.details.example.nextCalls[0].input, {});
+    const checkpoint = await call(server, 'session_checkpoint', {
+      phase: 'working', summary: 'Inspect the workspace next.',
+      nextCalls: [{ tool: 'workspace_info', input: {}, purpose: 'Continue the active inspection.' }],
+    }, identity);
+    assert.equal(checkpoint.body.data.continuation.mustContinue, true);
+    assert.equal(checkpoint.body.data.continuation.nextCall.tool, 'workspace_info');
+    const wrong = await call(server, 'list_dir', { path: '.' }, identity);
+    assert.equal(wrong.body.error.code, 'NEXT_CALL_REQUIRED');
+    assert.equal(wrong.body.error.details.nextCall.tool, 'workspace_info');
+    const continued = await call(server, 'workspace_info', {}, identity);
+    assert.equal(continued.body.ok, true);
+    assert.equal(continued.body.data.continuation.reason, 'continuation_plan_exhausted');
+    assert.match(continued.body.data.continuation.nextCallRequired, /exactly 1 nextCalls/);
+  } finally { await server.close(); }
+});
+
+test('optional Actions harness defaults off, adaptive accepts 1-3 calls, and contract changes require rediscovery', async () => {
+  const off = await createRuntime({ actionsContinuationMode: 'off' });
+  try {
+    const created = await root(off, 'harness-off');
+    const checkpoint = await call(off, 'session_checkpoint', { phase: 'working', summary: 'Core harness remains active.' }, created.identity);
+    assert.equal(checkpoint.body.ok, true);
+    assert.equal(checkpoint.body.data.continuation, undefined);
+  } finally { await off.close(); }
+
+  const adaptive = await createRuntime({ actionsContinuationMode: 'adaptive' });
+  try {
+    const created = await root(adaptive, 'harness-adaptive');
+    const missing = await call(adaptive, 'session_checkpoint', { phase: 'working', summary: 'Need a concrete plan.' }, created.identity);
+    assert.equal(missing.body.error.code, 'CONTINUATION_PLAN_REQUIRED');
+    assert.equal(missing.body.error.details.minCalls, 1);
+    assert.equal(missing.body.error.details.maxCalls, 3);
+    assert.equal(missing.body.error.details.example.nextCalls.length, 1);
+    const checkpoint = await call(adaptive, 'session_checkpoint', { phase: 'working', summary: 'Use one step before uncertain evidence.', nextCalls: [{ tool: 'workspace_info', input: {} }] }, created.identity);
+    assert.equal(checkpoint.body.data.continuation.nextCall.tool, 'workspace_info');
+  } finally { await adaptive.close(); }
+
+  const dirs = tempWorkspace();
+  try {
+    const base = { ...dirs, settingsPath: path.join(dirs.stateDir, 'settings.json'), host: '127.0.0.1', port: 0, connectorKey: CONNECTOR_KEY, actionsToken: ACTIONS_TOKEN, publicBaseUrl: '', maxOutputChars: 20_000, commandTimeoutSec: 10, uiLanguage: 'en', uiTheme: 'dark', passiveLockEnabled: false };
+    const store = new LiteStore(dirs.stateDir);
+    new ExtensionService({ ...base, actionsContinuationMode: 'off' }, store, new Map());
+    const created = store.registerRoot({ name: 'requirements-change' });
+    const adaptiveService = new ExtensionService({ ...base, actionsContinuationMode: 'adaptive' }, store, new Map());
+    const event = store.pendingEvents(created.session.id).find((item) => item.kind === 'requirements_changed');
+    assert.equal(event.payload.mode, 'adaptive');
+    const discovered = await adaptiveService.discover({ identity: created.identity }, { transport: 'actions' });
+    assert.equal(discovered.data.harness.mode, 'adaptive');
+    assert.equal(store.pendingEvents(created.session.id).some((item) => item.kind === 'requirements_changed'), false);
+  } finally { fs.rmSync(dirs.workspaceDir, { recursive: true, force: true }); }
+});
+
+test('Actions lookahead-3 mode advances a server-confirmed three-call queue', async () => {
+  const server = await createRuntime({ actionsContinuationMode: 'lookahead-3' });
+  try {
+    const schema = await (await fetch(`${server.baseUrl}/openapi.json`)).json();
+    assert.equal(schema.components.schemas.ExtensionToolInput.properties.nextCalls.minItems, 3);
+    assert.equal(schema.components.schemas.ExtensionToolInput.properties.nextCalls.maxItems, 3);
+    const created = await root(server, 'lookahead-mode');
+    const identity = created.identity;
+    const short = await call(server, 'session_checkpoint', { phase: 'working', summary: 'Plan is too short.', nextCalls: [{ tool: 'workspace_info', input: {} }] }, identity);
+    assert.equal(short.body.error.code, 'CONTINUATION_PLAN_REQUIRED');
+    assert.equal(short.body.error.details.requiredCount, 3);
+    const plan = [
+      { tool: 'workspace_info', input: {}, purpose: 'Read runtime metadata.' },
+      { tool: 'list_dir', input: { path: '.' }, purpose: 'Read the workspace root.' },
+      { tool: 'read_file', input: { path: 'hello.txt' }, purpose: 'Read the fixture file.' },
+    ];
+    const checkpoint = await call(server, 'session_checkpoint', { phase: 'working', summary: 'Execute the three-step inspection.', nextCalls: plan }, identity);
+    assert.equal(checkpoint.body.data.continuation.continuationMode, 'lookahead-3');
+    assert.equal(checkpoint.body.data.continuation.nextCall.tool, plan[0].tool);
+    for (let index = 0; index < plan.length; index += 1) {
+      const response = await call(server, plan[index].tool, plan[index].input, identity);
+      assert.equal(response.body.ok, true, JSON.stringify(response.body));
+      if (index < plan.length - 1) assert.equal(response.body.data.continuation.nextCall.tool, plan[index + 1].tool);
+      else assert.match(response.body.data.continuation.nextCallRequired, /exactly 3 nextCalls/);
+    }
+  } finally { await server.close(); }
+});
+
+test('operations exceeding 200ms detach, keep running, and complete through task_poll', async () => {
+  const server = await createRuntime({ actionsContinuationMode: 'next-call', nonBlockingTasksEnabled: true });
+  try {
+    const registration = await server.runtime.extensions.registerFromTui({ action: 'upsert', spec: {
+      name: 'slow_echo', title: 'Slow echo', description: 'Waits long enough to exercise background task detachment.',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+      handler: { kind: 'command', executable: process.execPath, args: ['-e', "setTimeout(() => process.stdout.write('done'), 450)"] },
+    } });
+    assert.equal(registration.ok, true);
+    const created = await root(server, 'background-mode');
+    const identity = created.identity;
+    await call(server, 'session_checkpoint', { phase: 'working', summary: 'Run the slow operation.', nextCalls: [{ tool: 'slow_echo', input: {} }] }, identity);
+    const started = performance.now();
+    const detached = await call(server, 'slow_echo', {}, identity);
+    const elapsed = performance.now() - started;
+    assert.equal(detached.body.data.result.status, 'running');
+    assert.ok(elapsed < 380, `expected fast return near 200ms, got ${elapsed}ms`);
+    const taskId = detached.body.data.result.taskId;
+    assert.equal(detached.body.data.continuation.nextCall.tool, 'task_poll');
+    const early = await call(server, 'task_poll', { taskId }, identity);
+    assert.equal(early.body.data.result.status, 'running');
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    const completed = await call(server, 'task_poll', { taskId }, identity);
+    assert.equal(completed.body.data.result.status, 'completed');
+    assert.equal(completed.body.data.result.operation.data.result.stdout, 'done');
+    assert.equal(completed.body.data.continuation.reason, 'continuation_plan_exhausted');
+  } finally { await server.close(); }
+});
+
+test('completed background task retention is bounded by count and serialized bytes', async () => {
+  const dirs = tempWorkspace();
+  const config = { ...dirs, settingsPath: path.join(dirs.stateDir, 'settings.json'), host: '127.0.0.1', port: 0, connectorKey: CONNECTOR_KEY, actionsToken: ACTIONS_TOKEN, publicBaseUrl: '', maxOutputChars: 20_000, commandTimeoutSec: 10, uiLanguage: 'en', uiTheme: 'dark', passiveLockEnabled: false, actionsContinuationMode: 'off', nonBlockingTasksEnabled: true };
+  const service = new ExtensionService(config, new LiteStore(dirs.stateDir), new Map());
+  try {
+    const completedAt = new Date().toISOString();
+    for (let index = 0; index < 110; index += 1) {
+      service.backgroundTasks.set(`task-${index}`, {
+        id: `task-${index}`, sessionId: 'fixture', tool: 'fixture', input: {}, source: 'actions',
+        startedAt: Date.now(), status: 'completed', completedAt,
+        response: { ok: true, data: { payload: 'x'.repeat(300_000), index } },
+      });
+    }
+    service.trimBackgroundTasks();
+    const retained = [...service.backgroundTasks.values()];
+    const retainedBytes = retained.reduce((total, task) => total + Buffer.byteLength(JSON.stringify(task.response)), 0);
+    assert.ok(retained.length <= 100);
+    assert.ok(retainedBytes <= 24 * 1024 * 1024);
+    assert.equal(service.backgroundTasks.has('task-0'), false);
+  } finally {
+    await service.shutdown();
+    fs.rmSync(dirs.workspaceDir, { recursive: true, force: true });
+  }
+});
+
+test('non-blocking task scheduling is independent and disabled by default', async () => {
+  const server = await createRuntime({ actionsContinuationMode: 'off', nonBlockingTasksEnabled: false });
+  try {
+    await server.runtime.extensions.registerFromTui({ action: 'upsert', spec: {
+      name: 'attached_echo', title: 'Attached echo', description: 'Waits past the optional fast-return threshold.',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+      handler: { kind: 'command', executable: process.execPath, args: ['-e', "setTimeout(() => process.stdout.write('attached'), 300)"] },
+    } });
+    const created = await root(server, 'attached-default');
+    const started = performance.now();
+    const response = await call(server, 'attached_echo', {}, created.identity);
+    assert.ok(performance.now() - started >= 250);
+    assert.equal(response.body.data.result.stdout, 'attached');
+    assert.equal(response.body.data.result.status, undefined);
+  } finally { await server.close(); }
+});
+
+test('harness-off failures do not inject an empty continuation contract', async () => {
+  const server = await createRuntime({ actionsContinuationMode: 'off', nonBlockingTasksEnabled: false });
+  try {
+    const created = await root(server, 'off-failure');
+    const response = await call(server, 'execute_cli', { command: `${JSON.stringify(process.execPath)} -e "process.exit(2)"` }, created.identity);
+    assert.equal(response.body.ok, false);
+    assert.equal(response.body.error.code, 'NON_ZERO_EXIT');
+    assert.equal(response.body.data.continuation, undefined);
+  } finally { await server.close(); }
+});
+
+test('runtime close cancels a detached command tree before it can mutate the workspace', async () => {
+  const server = await createRuntime({ actionsContinuationMode: 'off', nonBlockingTasksEnabled: true });
+  const target = path.join(server.dirs.workspaceDir, 'late-write.txt');
+  try {
+    const created = await root(server, 'shutdown-cancel');
+    const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify("setTimeout(() => require('fs').writeFileSync('late-write.txt', 'late'), 1200)")}`;
+    const detached = await call(server, 'execute_cli', { command, timeoutSec: 10 }, created.identity);
+    assert.equal(detached.body.data.result.status, 'running');
+    await server.runtime.close();
+    await new Promise((resolve) => setTimeout(resolve, 1350));
+    assert.equal(fs.existsSync(target), false);
+    assert.ok(server.runtime.store.auditFacts(100).some((fact) => fact.action === 'execute_cli' && fact.status === 'failed'));
+  } finally {
+    await server.runtime.close().catch(() => undefined);
+    fs.rmSync(server.dirs.workspaceDir, { recursive: true, force: true });
+  }
+});
+
+test('history pagination uses bounded ranges and notices external appends', () => {
+  const dirs = tempWorkspace();
+  try {
+    const store = new LiteStore(dirs.stateDir);
+    const created = store.registerRoot({ name: 'history-index' });
+    const historyPath = path.join(dirs.stateDir, 'history', `${created.session.id}.jsonl`);
+    const rows = Array.from({ length: 3000 }, (_, index) => JSON.stringify({ at: new Date(index).toISOString(), type: 'fixture', data: { index } })).join('\n') + '\n';
+    fs.appendFileSync(historyPath, rows);
+    const totalBefore = store.historyCount(created.session.id);
+    const page = store.historyPage(created.session.id, 1500, 10, false);
+    assert.equal(page.total, totalBefore);
+    assert.equal(page.entries.length, 10);
+    assert.equal(page.entries[0].data.index, 1499);
+    fs.appendFileSync(historyPath, `${JSON.stringify({ at: new Date(4000).toISOString(), type: 'external', data: { index: 3000 } })}\n`);
+    assert.equal(store.historyCount(created.session.id), totalBefore + 1);
+    assert.equal(store.historyPage(created.session.id, totalBefore, 1, false).entries[0].type, 'external');
+  } finally { fs.rmSync(dirs.workspaceDir, { recursive: true, force: true }); }
+});
+
+test('Apps exposes full generic and narrow direct tools, binds root sessions automatically, and stages blobs safely', async () => {
   const server = await createRuntime();
   try {
     const url = `${server.baseUrl}/mcp/${CONNECTOR_KEY}`;
     const init = await rpcPost(url, { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'lite-test', version: '1.0.0' } } });
     assert.match(init.data.result.instructions, /Do not use session_inherit to continue completed work/); assert.match(init.data.result.instructions, /message_conversation/);
     const listed = await rpcPost(url, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }, init.sessionId);
-    assert.deepEqual(listed.data.result.tools.map((tool) => tool.name).sort(), ['extension_call', 'extension_discover', 'extension_register']);
-    const anonymous = await rpcPost(url, { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'extension_discover', arguments: {}, _meta: { 'openai/session': 'chat-a' } } }, init.sessionId);
+    const appTools = listed.data.result.tools;
+    const names = appTools.map((tool) => tool.name);
+    for (const required of ['session_register', 'session_checkpoint', 'workspace_info', 'read_file', 'blob_create', 'blob_write_file', 'task_poll']) assert.ok(names.includes(required), required);
+    assert.equal(names.includes('extension_call'), true);
+    assert.equal(names.includes('extension_register'), true);
+    const genericCall = appTools.find((tool) => tool.name === 'extension_call');
+    const genericRegister = appTools.find((tool) => tool.name === 'extension_register');
+    assert.equal(genericCall.annotations.destructiveHint, true);
+    assert.equal(genericCall.annotations.openWorldHint, true);
+    assert.equal(genericRegister.annotations.destructiveHint, true);
+    assert.equal(genericRegister.annotations.openWorldHint, false);
+    const narrowTools = appTools.filter((tool) => !['extension_call', 'extension_register'].includes(tool.name));
+    assert.equal(narrowTools.every((tool) => tool.annotations?.destructiveHint === false && tool.annotations?.openWorldHint === false), true);
+    assert.equal(appTools.find((tool) => tool.name === 'message_inbox').annotations.readOnlyHint, false);
+    const anonymous = await rpcPost(url, { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'extension_discover', arguments: { identity: null }, _meta: { 'openai/session': 'chat-a' } } }, init.sessionId);
     assert.equal(anonymous.data.result.structuredContent.data.identityRequired, true);
-    const created = await rpcPost(url, { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'extension_call', arguments: { tool: 'session_register', input: { mode: 'root', name: 'apps-root' } }, _meta: { 'openai/session': 'chat-a' } } }, init.sessionId);
+    const created = await rpcPost(url, { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'session_register', arguments: { mode: 'root', name: 'apps-root' }, _meta: { 'openai/session': 'chat-a' } } }, init.sessionId);
     const identity = created.data.result.structuredContent.data.result.identity;
-    const verified = await rpcPost(url, { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'extension_discover', arguments: { identity, includeSchemas: false }, _meta: { 'openai/session': 'chat-a' } } }, init.sessionId);
-    assert.ok(verified.data.result.structuredContent.data.tools.length > 20);
-    const bound = await rpcPost(url, { jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'extension_discover', arguments: { includeSchemas: false }, _meta: { 'openai/session': 'chat-a' } } }, init.sessionId);
-    assert.ok(bound.data.result.structuredContent.data.tools.length > 20);
+    assert.ok(identity.sessionId && identity.sessionToken);
+    const bound = await rpcPost(url, { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'session_list', arguments: {}, _meta: { 'openai/session': 'chat-a' } } }, init.sessionId);
+    assert.equal(bound.data.result.structuredContent.data.result.sessions[0].name, 'apps-root');
+    const staged = await rpcPost(url, { jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'blob_create', arguments: { content: 'staged through apps' }, _meta: { 'openai/session': 'chat-a' } } }, init.sessionId);
+    const sha256 = staged.data.result.structuredContent.data.result.sha256;
+    const written = await rpcPost(url, { jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'blob_write_file', arguments: { sha256, path: 'from-blob.txt' }, _meta: { 'openai/session': 'chat-a' } } }, init.sessionId);
+    assert.equal(written.data.result.structuredContent.data.result.sha256, sha256);
+    assert.equal(written.data.result.structuredContent.data.result.alreadyExisted, false);
+    assert.equal(fs.readFileSync(path.join(server.dirs.workspaceDir, 'from-blob.txt'), 'utf8'), 'staged through apps');
+    const repeated = await rpcPost(url, { jsonrpc: '2.0', id: 71, method: 'tools/call', params: { name: 'blob_write_file', arguments: { sha256, path: 'from-blob.txt' }, _meta: { 'openai/session': 'chat-a' } } }, init.sessionId);
+    assert.equal(repeated.data.result.structuredContent.ok, true);
+    assert.equal(repeated.data.result.structuredContent.data.result.alreadyExisted, true);
+    const overwritten = await rpcPost(url, { jsonrpc: '2.0', id: 70, method: 'tools/call', params: { name: 'extension_call', arguments: { tool: 'write_file', input: { path: 'from-blob.txt', content: 'overwritten through generic Apps facade' } }, _meta: { 'openai/session': 'chat-a' } } }, init.sessionId);
+    assert.equal(overwritten.data.result.structuredContent.ok, true, JSON.stringify(overwritten.data.result.structuredContent));
+    assert.equal(fs.readFileSync(path.join(server.dirs.workspaceDir, 'from-blob.txt'), 'utf8'), 'overwritten through generic Apps facade');
+    const collision = await rpcPost(url, { jsonrpc: '2.0', id: 72, method: 'tools/call', params: { name: 'blob_write_file', arguments: { sha256, path: 'from-blob.txt' }, _meta: { 'openai/session': 'chat-a' } } }, init.sessionId);
+    assert.equal(collision.data.result.structuredContent.ok, false);
+    assert.match(collision.data.result.structuredContent.error.message, /different content/);
     const appFacts = server.runtime.store.auditFacts(100);
-    assert.ok(appFacts.some((fact) => fact.source === 'apps' && fact.action === 'extension_discover' && fact.status === 'completed'));
+    assert.ok(appFacts.some((fact) => fact.source === 'apps' && fact.action === 'session_register' && fact.status === 'completed'));
     assert.equal(appFacts.every((fact) => fact.source === 'apps'), true);
-    const completedAppCall = appFacts.find((fact) => fact.action === 'extension_discover' && fact.result);
+    const completedAppCall = appFacts.find((fact) => fact.action === 'session_register' && fact.result);
     assert.ok(completedAppCall.timestamp);
     assert.ok(completedAppCall.completedAt);
     assert.equal(completedAppCall.result.ok, true);
-    const differentChat = await rpcPost(url, { jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'extension_discover', arguments: {}, _meta: { 'openai/session': 'chat-b' } } }, init.sessionId);
-    assert.equal(differentChat.data.result.structuredContent.data.identityRequired, true);
+    const differentChat = await rpcPost(url, { jsonrpc: '2.0', id: 8, method: 'tools/call', params: { name: 'session_list', arguments: {}, _meta: { 'openai/session': 'chat-b' } } }, init.sessionId);
+    assert.equal(differentChat.data.result.structuredContent.error.code, 'IDENTITY_REQUIRED');
   } finally { await server.close(); }
 });
 

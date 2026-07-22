@@ -41,7 +41,7 @@ localterminal-lite --version
 localterminal-lite
 ```
 
-Use an absolute path without `..`. The installer verifies SHA-256, writes `~/LocalTerminal-Lite/releases/v1.1.1`, atomically updates `~/LocalTerminal-Lite/current`, and registers the launcher in the current user's PATH. Set `LOCALTERMINAL_LITE_HOME` or `LOCALTERMINAL_LITE_BIN_DIR` before running the command if you need different locations.
+Use an absolute path without `..`. The installer verifies SHA-256, writes `~/LocalTerminal-Lite/releases/v1.1.2`, atomically updates `~/LocalTerminal-Lite/current`, and registers the launcher in the current user's PATH. Set `LOCALTERMINAL_LITE_HOME` or `LOCALTERMINAL_LITE_BIN_DIR` before running the command if you need different locations.
 
 ## Install a local candidate on Windows
 
@@ -61,7 +61,7 @@ localterminal-lite --version
 localterminal-lite
 ```
 
-The installer verifies SHA-256, writes `%USERPROFILE%\LocalTerminal-Lite\releases\v1.1.1`, atomically updates `current`, and adds its command-launcher directory to the user PATH. Open a new terminal if the current PowerShell process does not yet see `localterminal-lite`.
+The installer verifies SHA-256, writes `%USERPROFILE%\LocalTerminal-Lite\releases\v1.1.2`, atomically updates `current`, and adds its command-launcher directory to the user PATH. Open a new terminal if the current PowerShell process does not yet see `localterminal-lite`.
 
 ## Verify without installing
 
@@ -134,7 +134,7 @@ localterminal-lite --version
 localterminal-lite
 ```
 
-请使用不含 `..` 的绝对路径。安装器会校验 SHA-256，把程序写入 `~/LocalTerminal-Lite/releases/v1.1.1`，原子更新 `~/LocalTerminal-Lite/current`，并注册当前用户的命令启动器。如需改变目录，请在运行前设置 `LOCALTERMINAL_LITE_HOME` 或 `LOCALTERMINAL_LITE_BIN_DIR`。
+请使用不含 `..` 的绝对路径。安装器会校验 SHA-256，把程序写入 `~/LocalTerminal-Lite/releases/v1.1.2`，原子更新 `~/LocalTerminal-Lite/current`，并注册当前用户的命令启动器。如需改变目录，请在运行前设置 `LOCALTERMINAL_LITE_HOME` 或 `LOCALTERMINAL_LITE_BIN_DIR`。
 
 ## 在 Windows 安装本地候选包
 
@@ -154,7 +154,7 @@ localterminal-lite --version
 localterminal-lite
 ```
 
-安装器会校验 SHA-256，把程序写入 `%USERPROFILE%\LocalTerminal-Lite\releases\v1.1.1`，原子更新 `current`，并把命令启动器目录加入用户 PATH。如果当前 PowerShell 尚未识别新命令，请重新打开终端。
+安装器会校验 SHA-256，把程序写入 `%USERPROFILE%\LocalTerminal-Lite\releases\v1.1.2`，原子更新 `current`，并把命令启动器目录加入用户 PATH。如果当前 PowerShell 尚未识别新命令，请重新打开终端。
 
 ## 恢复说明
 

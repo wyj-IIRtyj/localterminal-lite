@@ -14,7 +14,7 @@ function integer(value: string, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-export function Setup({ defaults, records, onComplete, onCancel }: { defaults: LiteSettings; records: WorkspaceRecord[]; onComplete: (settings: LiteSettings) => void; onCancel: () => void }) {
+export function Setup({ defaults, records, mouseEnabled = true, onComplete, onCancel }: { defaults: LiteSettings; records: WorkspaceRecord[]; mouseEnabled?: boolean; onComplete: (settings: LiteSettings) => void; onCancel: () => void }) {
   const { width, height } = useTerminalDimensions();
   const [attempt, setAttempt] = useState(0);
   const [pendingConflict, setPendingConflict] = useState<{ candidate: LiteSettings; message: string }>();
@@ -112,7 +112,7 @@ export function Setup({ defaults, records, onComplete, onCancel }: { defaults: L
 
   return (
     <box width={width} height={height} backgroundColor={theme.background}>
-      <FormDialog key={attempt} questions={questions} preamble={feedback} theme={theme} width={width} height={height} zh={defaults.uiLanguage === 'zh-CN'} onComplete={submit} onCancel={onCancel} />
+      <FormDialog key={attempt} questions={questions} preamble={feedback} theme={theme} width={width} height={height} zh={defaults.uiLanguage === 'zh-CN'} mouseEnabled={mouseEnabled} onComplete={submit} onCancel={onCancel} />
     </box>
   );
 }

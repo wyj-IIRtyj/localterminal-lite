@@ -5,13 +5,14 @@ import type { FormQuestion, Theme } from '../state.js';
 import { initialQuestionState, nextTextValue, optionAnswer, toggleSelectedOption } from '../form-model.js';
 import { Modal } from './Modal.js';
 
-export function FormDialog({ questions, preamble, theme, width, height, zh, onComplete, onCancel }: {
+export function FormDialog({ questions, preamble, theme, width, height, zh, mouseEnabled = true, onComplete, onCancel }: {
   questions: FormQuestion[];
   preamble: string[];
   theme: Theme;
   width: number;
   height: number;
   zh: boolean;
+  mouseEnabled?: boolean;
   onComplete: (answers: string[]) => void;
   onCancel: () => void;
 }) {
@@ -230,7 +231,9 @@ export function FormDialog({ questions, preamble, theme, width, height, zh, onCo
           {validation ? <text fg={theme.bad} wrapMode="word">{validation}</text> : null}
           {validating ? <text fg={theme.warn}>{zh ? '正在校验…' : 'Validating…'}</text> : null}
           <text fg={theme.muted}>{question.options
-            ? (question.multiSelect ? (zh ? '方向键选择 · Space 勾选 · Enter 确认 · 鼠标点击切换' : 'Arrows choose · Space toggle · Enter confirm · click to toggle') : (zh ? '方向键选择 · Enter 确认 · 鼠标第一次选中、第二次确认' : 'Arrows choose · Enter confirm · first click selects, second click confirms'))
+            ? (question.multiSelect
+              ? (mouseEnabled ? (zh ? '方向键选择 · Space 勾选 · Enter 确认 · 鼠标点击切换' : 'Arrows choose · Space toggle · Enter confirm · click to toggle') : (zh ? '方向键选择 · Space 勾选 · Enter 确认' : 'Arrows choose · Space toggle · Enter confirm'))
+              : (mouseEnabled ? (zh ? '方向键选择 · Enter 确认 · 鼠标第一次选中、第二次确认' : 'Arrows choose · Enter confirm · first click selects, second click confirms') : (zh ? '方向键选择 · Enter 确认' : 'Arrows choose · Enter confirm')))
             : question.multiline
               ? (zh ? 'Ctrl+Enter 下一步 · Ctrl+U 清空 · Esc 取消' : 'Ctrl+Enter next · Ctrl+U clear · Esc cancel')
               : (zh ? 'Enter 下一步 · Ctrl+U 清空 · Esc 取消' : 'Enter next · Ctrl+U clear · Esc cancel')}</text>

@@ -1,10 +1,11 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { isDeepStrictEqual } from 'node:util';
 import path from 'node:path';
 import type {
   AppSessionBinding, CustomExtensionSpec, JsonObject, LiteMessage, LiteSession, SessionCheckpoint,
   SessionEvent, SessionEventKind, SessionIdentity, SessionPhase, StoredState, TaskPackage,
-  SessionHistoryEntry, ToolAuditEvent,
+  SessionHistoryEntry, ToolAuditEvent, PlannedToolCall,
 } from './types.js';
 
 const EMPTY_STATE: StoredState = {
@@ -14,6 +15,7 @@ const TERMINAL_PHASES = new Set<SessionPhase>(['completed', 'cancelled']);
 const CHECKPOINT_REMINDER_MS = 2 * 60_000;
 const CHECKPOINT_BLOCK_MS = 5 * 60_000;
 const STALE_MS = 15 * 60_000;
+const FACADE_OPERATIONS = new Set(['extension_discover', 'extension_register', 'extension_call']);
 
 type LegacySession = {
   id: string; name: string; role: string; status: 'active' | 'idle' | 'blocked' | 'completed';
@@ -66,6 +68,19 @@ function cleanTask(task: TaskPackage): TaskPackage {
   };
 }
 
+function plannedToolCalls(value: unknown): PlannedToolCall[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 3) throw new LiteError('INVALID_INPUT', 'nextCalls must contain 1-3 planned tool calls.');
+  return value.map((item, index) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) throw new LiteError('INVALID_INPUT', `nextCalls[${index}] must be an object.`);
+    const call = item as JsonObject;
+    if (typeof call.tool !== 'string' || !/^[a-z][a-z0-9_]{2,63}$/.test(call.tool)) throw new LiteError('INVALID_INPUT', `nextCalls[${index}].tool is invalid.`);
+    if (FACADE_OPERATIONS.has(call.tool)) throw new LiteError('INVALID_INPUT', `nextCalls[${index}] must name a concrete tool invoked through extension_call, not facade operation ${call.tool}. Call facade operations before checkpointing.`);
+    if (!call.input || typeof call.input !== 'object' || Array.isArray(call.input)) throw new LiteError('INVALID_INPUT', `nextCalls[${index}].input must be an object.`);
+    if (call.purpose !== undefined && (typeof call.purpose !== 'string' || !call.purpose.trim() || call.purpose.length > 500)) throw new LiteError('INVALID_INPUT', `nextCalls[${index}].purpose must contain 1-500 characters.`);
+    return { tool: call.tool, input: structuredClone(call.input as JsonObject), ...(typeof call.purpose === 'string' ? { purpose: call.purpose.trim() } : {}) };
+  });
+}
+
 export function publicSession(session: LiteSession): JsonObject {
   const { controller, claimCodeHash: _claimCodeHash, ...visible } = session;
   return {
@@ -83,13 +98,17 @@ type AuditFact = ToolAuditEvent & {
   errorCode?: string;
 };
 
+type HistoryIndex = { size: number; mtimeMs: number; total: number; offsets: number[] };
+const HISTORY_INDEX_STRIDE = 256;
+const HISTORY_TAIL_LIMIT = 5_000;
+
 export class LiteStore {
   private state: StoredState;
   private readonly statePath: string;
   private readonly historyDir: string;
   private readonly journalPath: string;
   private readonly transientClaimCodes = new Map<string, string>();
-  private readonly historyCache = new Map<string, SessionHistoryEntry[]>();
+  private readonly historyIndexes = new Map<string, HistoryIndex>();
   private auditCache?: AuditFact[];
   private journalEntries = 0;
   private journalBytes = 0;
@@ -103,12 +122,77 @@ export class LiteStore {
   }
 
   snapshot(): StoredState { return structuredClone(this.state); }
+  snapshotForTui(messageLimit = 500, eventLimit = 200): StoredState {
+    return structuredClone({
+      ...this.state,
+      messages: this.state.messages.slice(-Math.max(1, messageLimit)),
+      events: this.state.events.slice(-Math.max(1, eventLimit)),
+    });
+  }
   revision(): number { return this.state.revision; }
+  listExtensions(): CustomExtensionSpec[] { return structuredClone(this.state.extensions); }
+  hasAppBinding(clientSessionKey: string): boolean { return this.state.appBindings.some((item) => item.clientSessionKey === clientSessionKey); }
+  activateHarnessContract(contract: NonNullable<StoredState['harnessContract']>): boolean {
+    const previous = this.state.harnessContract;
+    if (previous && previous.mode === contract.mode && previous.revision === contract.revision) return false;
+    this.state.harnessContract = structuredClone(contract);
+    const affected = this.state.sessions.filter((session) => !TERMINAL_PHASES.has(session.phase));
+    for (const session of affected) {
+      this.emitEvent(session.id, session.id, 'requirements_changed', {
+        previousMode: previous?.mode ?? 'unknown',
+        mode: contract.mode,
+        revision: contract.revision,
+        instruction: 'The Actions harness requirements changed. Call extension_discover and reread its tool requirements before continuing.',
+      });
+    }
+    this.save();
+    return affected.length > 0;
+  }
+
+  acknowledgeHarnessRequirements(sessionId: string): number {
+    const at = this.iso();
+    let count = 0;
+    for (const event of this.state.events) {
+      if (event.recipientSessionId === sessionId && event.kind === 'requirements_changed' && !event.acknowledgedAt) {
+        event.acknowledgedAt = at;
+        count += 1;
+      }
+    }
+    if (count) { this.appendHistory(sessionId, 'requirements_reread', { count, contract: this.state.harnessContract as unknown as JsonObject }); this.save(); }
+    return count;
+  }
+
   listSessions(): LiteSession[] { this.refreshTemporalStates(); return structuredClone(this.state.sessions); }
   session(id: string): LiteSession {
     const found = this.findSession(id);
     if (!found) throw new LiteError('NOT_FOUND', `Session not found: ${id}`);
     return structuredClone(found);
+  }
+
+  expectedContinuationCall(sessionId: string): PlannedToolCall | undefined {
+    return structuredClone(this.requireSession(sessionId).continuationPlan?.remainingCalls[0]);
+  }
+
+  assertContinuationCall(sessionId: string, tool: string, input: JsonObject): void {
+    const expected = this.requireSession(sessionId).continuationPlan?.remainingCalls[0];
+    if (!expected || (expected.tool === tool && isDeepStrictEqual(expected.input, input))) return;
+    throw new LiteError('NEXT_CALL_REQUIRED', `The active continuation plan requires ${expected.tool} next. Execute it now or checkpoint with replanReason if the plan is no longer valid.`, {
+      mustContinue: true,
+      userFacingFinalProhibited: true,
+      nextCall: structuredClone(expected) as unknown as JsonObject,
+    });
+  }
+
+  completeContinuationCall(sessionId: string, tool: string, input: JsonObject): void {
+    const session = this.requireSession(sessionId);
+    const plan = session.continuationPlan;
+    const expected = plan?.remainingCalls[0];
+    if (!plan || !expected || expected.tool !== tool || !isDeepStrictEqual(expected.input, input)) return;
+    plan.completedCalls.push(plan.remainingCalls.shift()!);
+    session.updatedAt = this.iso();
+    if (session.controller) session.controller.lastActivityAt = session.updatedAt;
+    this.appendHistory(session.id, 'continuation_call_completed', { tool, remainingCalls: plan.remainingCalls.length });
+    this.save();
   }
 
   registerRoot(args: { name: string; role?: string; continuesSessionId?: string }): { session: LiteSession; identity: SessionIdentity } {
@@ -243,6 +327,8 @@ export class LiteStore {
     const phase = input.phase as SessionPhase;
     if (!['pending', 'working', 'waiting', 'blocked', 'completed', 'cancelled'].includes(phase)) throw new LiteError('INVALID_INPUT', 'phase is invalid.');
     const summary = nonEmpty(input.summary, 'summary', 4000);
+    const nextCalls = input.nextCalls === undefined ? undefined : plannedToolCalls(input.nextCalls);
+    const replanReason = typeof input.replanReason === 'string' && input.replanReason.trim() ? input.replanReason.trim().slice(0, 1000) : undefined;
     if (TERMINAL_PHASES.has(session.phase)) throw new LiteError('SESSION_TERMINAL', 'Terminal sessions are immutable.');
     if (phase === 'completed' && !session.parentSessionId) {
       const now = this.iso();
@@ -251,7 +337,7 @@ export class LiteStore {
         const unreadMessages = this.state.messages.filter((message) => message.from === child.id && message.to === session.id && !message.readAt);
         const pendingEvents = this.state.events.filter((event) => event.recipientSessionId === session.id && event.sourceSessionId === child.id && !event.acknowledgedAt);
         const since = child.latestCheckpoint?.at || child.createdAt;
-        const recentOperations = this.readHistory(child.id)
+        const recentOperations = this.readRecentHistory(child.id)
           .filter((entry) => entry.type === 'tool_audit' && Date.parse(entry.at) >= Date.parse(since))
           .slice(-20)
           .map((entry) => ({ at: entry.at, tool: entry.data.tool, ok: entry.data.ok, durationMs: entry.data.durationMs, errorCode: entry.data.errorCode }));
@@ -278,6 +364,7 @@ export class LiteStore {
         };
         session.phase = 'working';
         session.latestCheckpoint = reviewCheckpoint;
+        delete session.continuationPlan;
         session.updatedAt = now;
         delete session.checkpointStartedAt;
         delete session.checkpointReminderEmittedAt;
@@ -307,9 +394,16 @@ export class LiteStore {
       artifacts: stringArray(input.artifacts, 'artifacts'),
       milestone: typeof input.milestone === 'string' && input.milestone.trim() ? input.milestone.trim().slice(0, 1000) : undefined,
       tags: stringArray(input.tags, 'tags'),
+      nextCalls,
+      replanReason,
     };
     session.phase = phase;
     session.latestCheckpoint = checkpoint;
+    session.continuationPlan = phase === 'working' && nextCalls ? {
+      createdAt: checkpoint.at,
+      completedCalls: [],
+      remainingCalls: structuredClone(nextCalls),
+    } : undefined;
     session.tags = [...new Set([...session.tags, ...(checkpoint.tags ?? [])])].slice(0, 100);
     session.updatedAt = checkpoint.at;
     delete session.checkpointStartedAt;
@@ -416,11 +510,14 @@ export class LiteStore {
   observeMessages(messages: LiteMessage[]): JsonObject[] {
     const observedAt = this.iso();
     const observedMs = Date.parse(observedAt);
+    const involvedSessions = new Set(messages.flatMap((message) => [message.from, message.to]).filter((id) => id !== 'user'));
+    const auditedBySession = new Map([...involvedSessions].map((id) => [id, this.readRecentHistory(id)
+      .filter((entry) => entry.type === 'tool_audit' && Date.parse(entry.at) <= observedMs)]));
     return messages.map((message) => {
       const sentMs = Date.parse(message.createdAt);
       const involved = new Set([message.from, message.to].filter((id) => id !== 'user'));
-      const operations = [...involved].flatMap((id) => this.readHistory(id)
-        .filter((entry) => entry.type === 'tool_audit' && Date.parse(entry.at) >= sentMs && Date.parse(entry.at) <= observedMs)
+      const operations = [...involved].flatMap((id) => (auditedBySession.get(id) ?? [])
+        .filter((entry) => Date.parse(entry.at) >= sentMs)
         .map((entry) => ({ sessionId: id, at: entry.at, tool: entry.data.tool, ok: entry.data.ok, durationMs: entry.data.durationMs })));
       return {
         message,
@@ -433,14 +530,24 @@ export class LiteStore {
     });
   }
 
-  inbox(sessionId: string, markRead = false): LiteMessage[] {
+  inbox(sessionId: string, markRead = false, offset?: number, limit = 50): LiteMessage[] {
+    return this.inboxPage(sessionId, markRead, offset, limit).messages;
+  }
+
+  inboxPage(sessionId: string, markRead = false, offset?: number, limit = 50): { total: number; offset: number; nextOffset?: number; messages: LiteMessage[] } {
     const session = this.requireSession(sessionId);
     const messages = this.state.messages.filter((message) => message.to === session.id);
+    const count = Math.max(1, Math.min(200, limit));
+    const start = offset === undefined ? Math.max(0, messages.length - count) : Math.max(0, Math.min(messages.length, offset));
+    const page = messages.slice(start, start + count);
     if (markRead) {
-      for (const message of messages) message.readAt ||= this.iso();
-      this.save();
+      let changed = false;
+      for (const message of page) {
+        if (!message.readAt) { message.readAt = this.iso(); changed = true; }
+      }
+      if (changed) this.save();
     }
-    return structuredClone(messages);
+    return { total: messages.length, offset: start, nextOffset: start + count < messages.length ? start + count : undefined, messages: structuredClone(page) };
   }
 
   listMessages(limit = 100): LiteMessage[] { return structuredClone(this.state.messages.slice(-Math.max(1, Math.min(1000, limit)))); }
@@ -467,18 +574,32 @@ export class LiteStore {
       sessions.unshift(cursor); seen.add(cursor.id);
       cursor = includeAncestors && cursor.continuesSessionId ? this.findSession(cursor.continuesSessionId) : undefined;
     }
-    const entries = sessions.flatMap((session) => this.readHistory(session.id).map((entry) => ({ sessionId: session.id, sessionName: session.name, ...entry })));
-    const start = Math.max(0, Math.min(entries.length, offset));
     const count = Math.max(1, Math.min(500, limit));
-    return { total: entries.length, offset: start, nextOffset: start + count < entries.length ? start + count : undefined, entries: structuredClone(entries.slice(start, start + count)) };
+    const totals = sessions.map((session) => this.historyCount(session.id));
+    const total = totals.reduce((sum, value) => sum + value, 0);
+    const start = Math.max(0, Math.min(total, offset));
+    if (sessions.length === 1) {
+      const session = sessions[0];
+      const entries = this.readHistoryRange(session.id, start, count).map((entry) => ({ sessionId: session.id, sessionName: session.name, ...entry }));
+      return { total, offset: start, nextOffset: start + count < total ? start + count : undefined, entries: structuredClone(entries) };
+    }
+    // Continuation chains are normally short. Read only the prefix needed for
+    // this page from each file, then merge by timestamp without caching files.
+    const entries = sessions.flatMap((session) => this.readHistoryRange(session.id, 0, Math.min(totals[sessions.indexOf(session)], start + count))
+      .map((entry) => ({ sessionId: session.id, sessionName: session.name, ...entry })))
+      .sort((a, b) => a.at.localeCompare(b.at));
+    return { total, offset: start, nextOffset: start + count < total ? start + count : undefined, entries: structuredClone(entries.slice(start, start + count)) };
   }
 
-  historiesForTui(sessionIds: string[]): Array<{ sessionId: string; sessionName: string; entry: SessionHistoryEntry }> {
+  historiesForTui(sessionIds: string[], limit = 200): Array<{ sessionId: string; sessionName: string; entry: SessionHistoryEntry }> {
+    const count = Math.max(1, Math.min(1_000, limit));
     return sessionIds.flatMap((id) => {
       const session = this.requireSession(id);
-      return this.readHistory(session.id).map((entry) => ({ sessionId: session.id, sessionName: session.name, entry }));
-    });
+      return this.readHistoryTail(session.id, count).map((entry) => ({ sessionId: session.id, sessionName: session.name, entry }));
+    }).sort((a, b) => a.entry.at.localeCompare(b.entry.at)).slice(-count);
   }
+
+  historyCount(sessionId: string): number { return this.historyIndex(sessionId).total; }
 
   auditFacts(limit = 500): AuditFact[] {
     this.auditCache ||= this.state.sessions.flatMap((session) => this.auditFactsFromHistory(session))
@@ -520,7 +641,7 @@ export class LiteStore {
 
   private auditFactsFromHistory(session: LiteSession): AuditFact[] {
     const facts = new Map<string, AuditFact>();
-    for (const entry of this.readHistory(session.id)) {
+    for (const entry of this.readRecentHistory(session.id)) {
       if (entry.type !== 'tool_audit') continue;
       const next = this.auditFact(session, entry);
       const previous = facts.get(next.id);
@@ -564,15 +685,15 @@ export class LiteStore {
 
   context(sessionId: string): JsonObject {
     const session = this.requireSession(sessionId);
-    const history = this.readHistory(session.id);
+    const history = this.readRecentHistory(session.id);
     const audits = history.filter((item) => item.type === 'tool_audit').slice(-10).map((item) => item.data);
     const candidates = this.state.messages.filter((message) => message.from === session.id || message.to === session.id);
     const unread = candidates.filter((message) => message.to === session.id && !message.readAt).slice(-20);
     const messages = [...candidates.filter((message) => message.readAt || message.to !== session.id).slice(-(20 - unread.length)), ...unread];
     const parent = session.parentSessionId ? this.requireSession(session.parentSessionId) : undefined;
-    const parentAudits = parent ? this.readHistory(parent.id).filter((item) => item.type === 'tool_audit').slice(-10).map((item) => item.data) : [];
+    const parentAudits = parent ? this.readRecentHistory(parent.id).filter((item) => item.type === 'tool_audit').slice(-10).map((item) => item.data) : [];
     const predecessor = session.continuesSessionId ? this.requireSession(session.continuesSessionId) : undefined;
-    const predecessorAudits = predecessor ? this.readHistory(predecessor.id).filter((item) => item.type === 'tool_audit').slice(-10).map((item) => item.data) : [];
+    const predecessorAudits = predecessor ? this.readRecentHistory(predecessor.id).filter((item) => item.type === 'tool_audit').slice(-10).map((item) => item.data) : [];
     const predecessorMessages = predecessor ? this.state.messages.filter((message) => message.from === predecessor.id || message.to === predecessor.id).slice(-20) : [];
     const projection: JsonObject = {
       session: publicSession(session), objective: session.task?.objective,
@@ -624,7 +745,7 @@ export class LiteStore {
   deleteFromTui(sessionId: string, confirmation?: string): { deleted: string[] } {
     const session = this.requireSession(sessionId);
     const descendants = this.state.sessions.filter((item) => item.parentSessionId === session.id);
-    if ((descendants.length || this.readHistory(session.id).length) && confirmation !== `DELETE ${session.id}`) {
+    if ((descendants.length || this.historyCount(session.id)) && confirmation !== `DELETE ${session.id}`) {
       throw new LiteError('DELETE_CONFIRMATION_REQUIRED', `Type DELETE ${session.id} to remove this session, its descendants, and their histories.`, { descendants: descendants.map((item) => item.id) });
     }
     const deleted = new Set([session.id, ...descendants.map((item) => item.id)]);
@@ -634,7 +755,7 @@ export class LiteStore {
     this.state.subscriptions = this.state.subscriptions.filter((item) => !deleted.has(item.subscriberSessionId) && !deleted.has(item.targetSessionId));
     this.state.appBindings = this.state.appBindings.filter((item) => !deleted.has(item.sessionId));
     for (const item of this.state.sessions) if (item.continuesSessionId && deleted.has(item.continuesSessionId)) item.predecessorDeleted = true;
-    for (const id of deleted) { rmSync(this.historyPath(id), { force: true }); this.transientClaimCodes.delete(id); this.historyCache.delete(id); }
+    for (const id of deleted) { rmSync(this.historyPath(id), { force: true }); this.transientClaimCodes.delete(id); this.historyIndexes.delete(id); }
     if (this.auditCache) this.auditCache = this.auditCache.filter((item) => !deleted.has(item.sessionId));
     this.save();
     return { deleted: [...deleted] };
@@ -707,7 +828,7 @@ export class LiteStore {
   private handoffPrompt(session: LiteSession, claimCode: string): string {
     const task = session.task;
     const format = (items?: string[]) => items?.length ? items.map((item) => `- ${item}`).join('\n') : '- 未指定';
-    return `你来接手 LocalTerminal Lite session “${session.name}”。\n\n身份与领取：\n在调用任何工作工具前，先调用 extensionCall：tool=session_inherit，input={"sessionId":"${session.id}","claimCode":"${claimCode}"}。接管后使用返回的 sessionId + sessionToken 作为后续所有调用的 identity。\n\n角色：${session.role}\n目标：${task?.objective || '继续此 session 的工作'}\n背景：${task?.background || '无额外背景'}\n交付物：\n${format(task?.deliverables)}\n验收标准：\n${format(task?.acceptanceCriteria)}\n约束：\n${format(task?.constraints)}\n\n协作与状态要求：\n- 子 session 的目标是并行高效和专业分工，不是被动等待或只做单向监督。\n- 在不产生冲突且符合范围时，主动完成可帮助其他 session 的工作，并通过 message_send 交接可直接纳入的成果。\n- 持续工作直到自己的交付物和验收标准完成、明确阻塞，或必须等待外部输入；不要在一次消息往返后无故停下。\n- 未完成全部工作时，禁止向用户输出完成式或总结式最终回复；阶段性进展通过 message_send、事件确认和 session_checkpoint 记录。\n- session 状态更新优先级最高。结束任何工作轮次前的最后一个 LocalTerminal 调用必须是 session_checkpoint，准确写入 working/waiting/blocked/completed。\n- 只有完成并验证所有交付物后才能使用 completed。`;
+    return `你来接手 LocalTerminal Lite session “${session.name}”。\n\n身份与领取：\n在调用任何工作工具前，先调用 extensionCall：tool=session_inherit，input={"sessionId":"${session.id}","claimCode":"${claimCode}"}。接管后使用返回的 sessionId + sessionToken 作为后续所有调用的 identity。\n\n角色：${session.role}\n目标：${task?.objective || '继续此 session 的工作'}\n背景：${task?.background || '无额外背景'}\n交付物：\n${format(task?.deliverables)}\n验收标准：\n${format(task?.acceptanceCriteria)}\n约束：\n${format(task?.constraints)}\n\n协作与状态要求：\n- 子 session 的目标是并行高效和专业分工，不是被动等待或只做单向监督。\n- 在不产生冲突且符合范围时，主动完成可帮助其他 session 的工作，并通过 message_send 交接可直接纳入的成果。\n- 持续工作直到自己的交付物和验收标准完成、明确阻塞，或必须等待外部输入；不要在一次消息往返后无故停下。\n- 未完成全部工作时，禁止向用户输出完成式或总结式最终回复；阶段性进展通过 message_send、事件确认和 session_checkpoint 记录。\n- session 状态更新优先级最高。session_checkpoint 用于持久化准确 phase，但 working checkpoint 不是停止点；若响应要求继续，必须在同一轮立即执行返回的 nextCall。只有 waiting/blocked/completed/cancelled 可以结束工作轮次。\n- 只有完成并验证所有交付物后才能使用 completed。`;
   }
 
   private notifyProgress(session: LiteSession, kind: SessionEventKind, payload: JsonObject): void {
@@ -730,14 +851,87 @@ export class LiteStore {
   private appendHistory(sessionId: string, type: string, data: JsonObject): void {
     const entry: SessionHistoryEntry = { at: this.iso(), type, data };
     appendFileSync(this.historyPath(sessionId), `${JSON.stringify(entry)}\n`, { mode: 0o600 });
-    this.historyCache.get(sessionId)?.push(entry);
+    this.historyIndexes.delete(sessionId);
   }
-  private readHistory(sessionId: string): SessionHistoryEntry[] {
-    const cached = this.historyCache.get(sessionId);
-    if (cached) return cached;
+  private readRecentHistory(sessionId: string): SessionHistoryEntry[] {
+    return this.readHistoryTail(sessionId, HISTORY_TAIL_LIMIT);
+  }
+
+  private readHistoryTail(sessionId: string, limit: number): SessionHistoryEntry[] {
+    const total = this.historyCount(sessionId);
+    return this.readHistoryRange(sessionId, Math.max(0, total - limit), limit);
+  }
+
+  private historyIndex(sessionId: string): HistoryIndex {
     const file = this.historyPath(sessionId);
-    const entries: SessionHistoryEntry[] = !existsSync(file) ? [] : readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean).flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } });
-    this.historyCache.set(sessionId, entries);
+    if (!existsSync(file)) return { size: 0, mtimeMs: 0, total: 0, offsets: [0] };
+    const stat = statSync(file);
+    const cached = this.historyIndexes.get(sessionId);
+    if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) return cached;
+    const offsets = [0];
+    let total = 0;
+    let position = 0;
+    let lineStart = 0;
+    const fd = openSync(file, 'r');
+    const buffer = Buffer.allocUnsafe(64 * 1024);
+    try {
+      while (position < stat.size) {
+        const bytes = readSync(fd, buffer, 0, Math.min(buffer.length, stat.size - position), position);
+        if (!bytes) break;
+        for (let index = 0; index < bytes; index += 1) {
+          if (buffer[index] !== 10) continue;
+          const lineEnd = position + index;
+          if (lineEnd > lineStart) {
+            total += 1;
+            if (total % HISTORY_INDEX_STRIDE === 0 && lineEnd + 1 < stat.size) offsets.push(lineEnd + 1);
+          }
+          lineStart = lineEnd + 1;
+        }
+        position += bytes;
+      }
+      if (lineStart < stat.size) total += 1;
+    } finally { closeSync(fd); }
+    const built = { size: stat.size, mtimeMs: stat.mtimeMs, total, offsets };
+    this.historyIndexes.set(sessionId, built);
+    return built;
+  }
+
+  private readHistoryRange(sessionId: string, offset: number, limit: number): SessionHistoryEntry[] {
+    const index = this.historyIndex(sessionId);
+    if (!index.total || offset >= index.total || limit <= 0) return [];
+    const start = Math.max(0, offset);
+    const checkpoint = Math.floor(start / HISTORY_INDEX_STRIDE);
+    let lineNumber = checkpoint * HISTORY_INDEX_STRIDE;
+    let position = index.offsets[checkpoint] ?? 0;
+    let carry = Buffer.alloc(0);
+    const entries: SessionHistoryEntry[] = [];
+    const fd = openSync(this.historyPath(sessionId), 'r');
+    const buffer = Buffer.allocUnsafe(64 * 1024);
+    const consume = (line: Buffer) => {
+      if (!line.length) return;
+      if (lineNumber >= start && entries.length < limit) {
+        try { entries.push(JSON.parse(line.toString('utf8')) as SessionHistoryEntry); }
+        catch { /* tolerate a corrupt history line without losing later entries */ }
+      }
+      lineNumber += 1;
+    };
+    try {
+      while (position < index.size && entries.length < limit) {
+        const bytes = readSync(fd, buffer, 0, Math.min(buffer.length, index.size - position), position);
+        if (!bytes) break;
+        const chunk = carry.length ? Buffer.concat([carry, buffer.subarray(0, bytes)]) : buffer.subarray(0, bytes);
+        let startAt = 0;
+        for (let cursor = 0; cursor < chunk.length; cursor += 1) {
+          if (chunk[cursor] !== 10) continue;
+          consume(chunk.subarray(startAt, cursor));
+          startAt = cursor + 1;
+          if (entries.length >= limit) break;
+        }
+        carry = startAt < chunk.length ? Buffer.from(chunk.subarray(startAt)) : Buffer.alloc(0);
+        position += bytes;
+      }
+      if (entries.length < limit && carry.length) consume(carry);
+    } finally { closeSync(fd); }
     return entries;
   }
 

@@ -66,7 +66,7 @@ export class LiteRuntime {
     this.mcp = new LiteMcpTransport(this.extensions);
     this.app = express();
     this.app.disable('x-powered-by');
-    this.app.use(express.json({ limit: '256kb' }));
+    this.app.use(express.json({ limit: '2mb' }));
     this.internalServer = http.createServer(this.app);
     this.configureRoutes();
     this.persistRuntimeLifecycle('starting', 'runtime constructed');
@@ -102,6 +102,8 @@ export class LiteRuntime {
       uiLanguage: this.config.uiLanguage,
       uiTheme: this.config.uiTheme,
       passiveLockEnabled: this.config.passiveLockEnabled,
+      actionsContinuationMode: this.config.actionsContinuationMode,
+      nonBlockingTasksEnabled: this.config.nonBlockingTasksEnabled,
     };
   }
 
@@ -420,7 +422,7 @@ export class LiteRuntime {
   private createClusterGateway(): Express {
     const gateway = express();
     gateway.disable('x-powered-by');
-    gateway.use(express.json({ limit: '256kb' }));
+    gateway.use(express.json({ limit: '2mb' }));
     gateway.get('/health', async (req, res) => {
       const state = this.cluster!.read();
       const requestedWorkspaceId = typeof req.query.workspaceId === 'string' ? req.query.workspaceId : undefined;
@@ -476,9 +478,16 @@ export class LiteRuntime {
     // registry. Doing this in the opposite order leaves a live gateway with an
     // empty member list during shutdown, which surfaces as a false
     // WORKSPACE_UNAVAILABLE response even though another member can take over.
-    if (this.publicServer?.listening) await new Promise<void>((resolve) => this.publicServer!.close(() => resolve()));
+    const publicClosed = this.publicServer?.listening
+      ? new Promise<void>((resolve) => this.publicServer!.close(() => resolve()))
+      : Promise.resolve();
     try { this.cluster?.unregister(); } catch { /* best effort */ }
 
+    // Abort owned command trees before waiting for HTTP transports to drain.
+    // Otherwise a detached command can keep a close request open and continue
+    // mutating the workspace after the runtime lease has been released.
+    await this.extensions.shutdown();
+    await publicClosed;
     await this.mcp.close();
     if (this.clusterMcp) await this.clusterMcp.close();
     if (this.internalServer.listening) await new Promise<void>((resolve) => this.internalServer.close(() => resolve()));
@@ -525,7 +534,7 @@ export class LiteRuntime {
     this.app.post('/cluster/owns', async (req, res) => {
       if (!this.clusterMember || req.header('x-localterminal-cluster-secret') !== this.clusterMember.secret) { res.status(404).json({ error: 'Not found.' }); return; }
       const clientSessionKey = typeof req.body?.clientSessionKey === 'string' ? req.body.clientSessionKey : '';
-      res.json({ owned: Boolean(clientSessionKey && this.store.snapshot().appBindings.some((item) => item.clientSessionKey === clientSessionKey)) });
+      res.json({ owned: Boolean(clientSessionKey && this.store.hasAppBinding(clientSessionKey)) });
     });
     this.app.post('/cluster/rpc/:method', async (req, res) => {
       if (!this.clusterMember || req.header('x-localterminal-cluster-secret') !== this.clusterMember.secret) { res.status(404).json({ error: 'Not found.' }); return; }

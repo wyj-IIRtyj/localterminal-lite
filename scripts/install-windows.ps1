@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Stop"
 
-$Version = if ($env:LOCALTERMINAL_LITE_VERSION) { $env:LOCALTERMINAL_LITE_VERSION } else { "v1.1.1" }
+$Version = if ($env:LOCALTERMINAL_LITE_VERSION) { $env:LOCALTERMINAL_LITE_VERSION } else { "v1.1.2" }
 $Repository = "wyj-IIRtyj/localterminal-lite"
 $InstallDir = if ($env:LOCALTERMINAL_LITE_HOME) { $env:LOCALTERMINAL_LITE_HOME } else { Join-Path $HOME "LocalTerminal-Lite" }
 $LauncherDir = if ($env:LOCALTERMINAL_LITE_BIN_DIR) { $env:LOCALTERMINAL_LITE_BIN_DIR } else { Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "LocalTerminal-Lite\bin" }

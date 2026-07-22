@@ -102,13 +102,11 @@ export function App({ controller, onExit }: { controller: TuiController; onExit:
   const switchTab = useCallback((index: number) => { setRevealCredentials(false); setDetail(undefined); if (index !== 6) { setLogPage(0); setLogAnchorAt(undefined); } setTab(index); }, []);
   const nextTab = useCallback((delta: number) => { setRevealCredentials(false); setDetail(undefined); setTab((value) => (value + TABS.length + delta) % TABS.length); }, []);
   const back = useCallback(() => { setRevealCredentials(false); setDetail(undefined); }, []);
-  const quit = useCallback(async () => {
+  const quit = useCallback(() => {
     if (exiting.current) return;
     exiting.current = true;
-    try { await controller.shutdown(); }
-    catch (error) { controller.runtime.log(error instanceof Error ? error.message : String(error), 'error'); }
-    finally { onExit(); }
-  }, [controller, onExit]);
+    onExit();
+  }, [onExit]);
 
   const groups = logicalSessionGroups(state.sessions);
   const conversations = conversationGroups(state.messages);
@@ -119,8 +117,8 @@ export function App({ controller, onExit }: { controller: TuiController; onExit:
     setSelected((values) => {
       const next = [...values];
       const count = tab === 1 ? logicalSessionGroups(controller.runtime.store.listSessions()).length
-        : tab === 2 ? conversationGroups(controller.runtime.store.snapshot().messages).length
-          : tab === 4 ? controller.runtime.store.snapshot().extensions.length : 0;
+        : tab === 2 ? conversationGroups(controller.runtime.store.listMessages(1000)).length
+          : tab === 4 ? controller.runtime.store.listExtensions().length : 0;
       next[tab] = Math.max(0, Math.min(Math.max(0, count - 1), (next[tab] || 0) + delta));
       return next;
     });
@@ -151,7 +149,7 @@ export function App({ controller, onExit }: { controller: TuiController; onExit:
   const sendMessageAction = useCallback(() => runAction(() => controller.sendMessage(ask)), [runAction, controller, ask]);
   const refreshDiffAction = useCallback(() => runAction(() => controller.refreshDiff()), [runAction, controller]);
   const addExtensionAction = useCallback(() => runAction(() => controller.addExtension(ask)), [runAction, controller, ask]);
-  const removeExtensionAction = useCallback(() => runAction(() => controller.removeExtension(controller.runtime.store.snapshot().extensions[selected[4] || 0]?.name, ask)), [runAction, controller, selected, ask]);
+  const removeExtensionAction = useCallback(() => runAction(() => controller.removeExtension(controller.runtime.store.listExtensions()[selected[4] || 0]?.name, ask)), [runAction, controller, selected, ask]);
   const configureAction = useCallback(() => runAction(() => controller.editSettings(ask)), [runAction, controller, ask]);
   const rotateCredentialsAction = useCallback(() => runAction(async () => { await controller.rotateCredentials(ask); }), [runAction, controller, ask]);
   const updateApplicationAction = useCallback(() => runAction(() => controller.updateApplication(ask)), [runAction, controller, ask]);
@@ -255,8 +253,8 @@ export function App({ controller, onExit }: { controller: TuiController; onExit:
       >
         {content}
       </scrollbox>
-      <Footer tab={tab} detail={detail} theme={theme} zh={zh} notice={notice} />
-      {form ? <FormDialog key={form.id} questions={form.questions} preamble={form.preamble} theme={theme} width={width} height={height} zh={zh} onComplete={completeForm} onCancel={cancelForm} /> : null}
+      <Footer tab={tab} detail={detail} theme={theme} zh={zh} mouseEnabled={renderer.useMouse} notice={notice} />
+      {form ? <FormDialog key={form.id} questions={form.questions} preamble={form.preamble} theme={theme} width={width} height={height} zh={zh} mouseEnabled={renderer.useMouse} onComplete={completeForm} onCancel={cancelForm} /> : null}
     </box>
     </FatalErrorBoundary>
   );

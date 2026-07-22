@@ -60,6 +60,7 @@ export function SessionDetail({ runtime, groupId, theme, zh }: { runtime: LiteRu
   if (!group) return <box padding={1}><Line color={theme.bad}>{zh ? 'Session 已不存在，按 Esc 返回。' : 'Session no longer exists. Press Esc.'}</Line></box>;
   const ids = [...group.sessions, ...group.children].map((session) => session.id);
   const history = runtime.store.historiesForTui(ids);
+  const historyTotal = ids.reduce((sum, id) => sum + runtime.store.historyCount(id), 0);
   return (
     <box flexDirection="column" width="100%" padding={1} gap={1}>
       <Heading theme={theme}>{group.title}</Heading>
@@ -77,6 +78,7 @@ export function SessionDetail({ runtime, groupId, theme, zh }: { runtime: LiteRu
       {group.children.length ? <Heading theme={theme}>{zh ? '协作子会话' : 'Collaborating children'}</Heading> : null}
       {group.children.map((child) => <box key={child.id} flexDirection="row" gap={1} flexWrap="wrap" paddingLeft={1}><text fg={theme.text}>└─ 📁 {child.name}</text><SessionStatus session={child} theme={theme} /><text fg={theme.muted}>{child.id}</text></box>)}
       <Heading theme={theme}>{zh ? '永久结构化历史' : 'Permanent structured history'}</Heading>
+      <Line color={theme.muted}>{historyTotal > history.length ? (zh ? `显示最近 ${history.length} / ${historyTotal} 条；完整记录可通过 session_history 分页读取。` : `Showing latest ${history.length} of ${historyTotal}; use paginated session_history for the complete record.`) : `${history.length} ${zh ? '条记录' : 'entries'}`}</Line>
       {history.map((item, index) => (
         <box key={`${item.sessionId}-${item.entry.at}-${index}`} flexDirection="column" border={['left']} borderColor={theme.border} paddingLeft={1}>
           <text fg={theme.muted} wrapMode="word">{item.entry.at} <span style={{ fg: theme.accent }}>{item.sessionName}</span> <b>{item.entry.type}</b></text>

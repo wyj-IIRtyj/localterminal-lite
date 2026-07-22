@@ -2,7 +2,7 @@
 
 [English](ACTIONS_SETUP.md) · [推荐 GPT 预设指令](GPT_INSTRUCTIONS.zh-CN.md) · [短提示词手册](PROMPT_PLAYBOOK.zh-CN.md) · [隐私说明](PRIVACY.zh-CN.md)
 
-本教程从一台没有开发环境的新电脑开始，直到完成一个可测试的私有 GPT。教程基于 LocalTerminal Lite 1.1.1 和 ChatGPT 网页编辑器。OpenAI 当前向付费用户提供 GPT 创建功能，具体还受工作区角色、策略和 Actions 域名限制。一个 GPT 只能选择 **Apps 或 Actions，不能同时使用两者**。使用 ChatGPT 的 Pro mode 时不能使用 Actions，因此 Actions GPT 的编辑器会提供兼容的非 Pro 模型。参见 OpenAI 的 [GPT 创建说明](https://help.openai.com/en/articles/8554397-creating-a-gpt)和 [Actions 配置说明](https://help.openai.com/en/articles/9442513)。
+本教程从一台没有开发环境的新电脑开始，直到完成一个可测试的私有 GPT。教程基于 LocalTerminal Lite 1.1.2 和 ChatGPT 网页编辑器。OpenAI 当前向付费用户提供 GPT 创建功能，具体还受工作区角色、策略和 Actions 域名限制。一个 GPT 只能选择 **Apps 或 Actions，不能同时使用两者**。使用 ChatGPT 的 Pro mode 时不能使用 Actions，因此 Actions GPT 的编辑器会提供兼容的非 Pro 模型。参见 OpenAI 的 [GPT 创建说明](https://help.openai.com/en/articles/8554397-creating-a-gpt)和 [Actions 配置说明](https://help.openai.com/en/articles/9442513)。
 
 > ChatGPT 截图来自本地 HTML 存档的隐私安全裁剪，只保留通用配置界面；不含聊天正文、账户身份、真实地址或真实凭据。ChatGPT 的具体标签以后可能调整。
 
@@ -26,19 +26,19 @@ flowchart LR
 ### macOS
 
 ```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.1.1/scripts/install-macos.sh)"
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.1.2/scripts/install-macos.sh)"
 ```
 
 ### Linux
 
 ```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.1.1/scripts/install-linux.sh)"
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.1.2/scripts/install-linux.sh)"
 ```
 
 ### Windows PowerShell
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.1.1/scripts/install-windows.ps1 | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/wyj-IIRtyj/localterminal-lite/v1.1.2/scripts/install-windows.ps1 | iex"
 ```
 
 安装脚本会下载与当前平台匹配的独立可执行文件和 SHA-256 文件，完成校验后写入版本化 release 目录，把 `localterminal-lite` 注册到当前用户的 PATH，然后打开 TUI。它不会安装 Git、Node.js、Bun 或包依赖。如果组织不允许直接运行远端脚本，请先打开仓库中的脚本检查内容。第二次及以后只需重新打开终端并输入：
@@ -64,7 +64,7 @@ localterminal-lite
 
 ![LocalTerminal Lite 设置](assets/tui/settings-zh-CN.svg)
 
-设置页面是工作区、监听地址、公网 URL、限制和隐藏凭据的唯一配置入口。
+设置页面是工作区、监听地址、公网 URL、限制、隐藏凭据、可选**长任务 Harness**与可选**非阻塞任务**的唯一配置入口。两项功能默认都关闭且互相独立；`adaptive` 使用灵活的 1–3 条计划，`next-call` / `lookahead-3` 用于严格 A/B 诊断。切换任一设置都会重启 Lite 并生成匹配的 OpenAPI schema；Harness 变化还会向活动 session 发出 `requirements_changed`。模型应重新 discover，并在 GPT 编辑器中重新导入 `/openapi.json`。
 
 ## 2. 为 Actions 提供 HTTPS 地址
 
@@ -187,14 +187,22 @@ https://random-words.trycloudflare.com/openapi.json
 
 预期顺序：
 
-1. 无身份的 `extensionDiscover` 只返回 bootstrap 引导；
-2. `extensionCall` 用 `input.mode="root"` 调用 `session_register`；
+1. 完全省略 `identity` 键的 `extensionDiscover` 只返回 bootstrap 引导；
+2. `extensionCall` 用 `input.mode="root"` 调用 `session_register`，同样不包含 `identity` 键；
 3. GPT 在内部保存返回的 `sessionId + sessionToken`；
 4. 认证后的 discover 暴露具体工具目录；
 5. `workspace_info` 通过带顶层 `identity` 的 `extensionCall` 执行；
 6. 回复结束前，`session_checkpoint` 写入 summary 和 `waiting` phase。
 
 Lite 日志页会把每次调用显示为一条持续更新的记录：来源（`ACTIONS`）、工具名、脱敏后的完整参数、`running` 状态和开始时间；返回后在同一记录中显示脱敏后的完整结果、耗时以及 `completed`、`failed` 或 `timeout` 状态。
+
+然后在设置页的三种增强模式下分别测试未完成任务续执行：
+
+```text
+检查项目三个不同部分。第一次观察后记录 working checkpoint，然后不要向我发送中间回复，继续工作。
+```
+
+`adaptive` 的 working checkpoint 可包含 1–3 项 `nextCalls`：步骤可预测时优先给 3 项，测试结果或后台任务可能迫使重排时只给 1 项。`next-call` 必须恰好 1 项，`lookahead-3` 必须恰好 3 项。增强模式都会返回 `continuation.mustContinue=true` 和准确 `nextCall`，GPT 必须立即调用；顺序不符会返回 `NEXT_CALL_REQUIRED`。另行开启**非阻塞任务**后，工具超过 200ms 才会返回 `status=running` 与 `taskId` 并释放 HTTP 请求；关闭时会正常等待。最后把两项都切回关闭，确认核心行为不受影响。
 
 继续测试协作：
 
@@ -215,12 +223,16 @@ Lite 日志页会把每次调用显示为一条持续更新的记录：来源（
 | 现象 | 处理方法 |
 | --- | --- |
 | `Input should be '3.1.1' or '3.1.0'` | 更新 Lite，导入准确的 `/openapi.json` URL，并删除旧的手工 schema。 |
-| `components.schemas ... is not an object` | 使用了旧版或被修改的 schema。Lite 1.1.1 返回具体对象；从运行中的服务重新导入。 |
+| `components.schemas ... is not an object` | 使用了旧版或被修改的 schema。Lite 1.1.2 返回具体对象；从运行中的服务重新导入。 |
+| `ApiTypeError: Expected identity to be a dict` | 重新导入 `/openapi.json` 并粘贴当前 GPT 指令。bootstrap 调用应省略 `identity` 键，不能发送 `identity:null` 或 `identity:{}`；更新到包含本兼容修复的构建后，显式 null 也会被视为未提供 bootstrap identity。 |
 | `spec must be an object` | `extensionRegister` 需要顶层 `spec:{...}`。创建 session 应使用 `extensionCall` + `tool:"session_register"`。 |
 | `input.name is required`、`input.to is required` 或 `input.body is required` | 把参数放入 `extensionCall.input`，例如 `{tool:"message_send", input:{to:"reviewer", body:"Ready"}, identity:{...}}`。 |
 | `IDENTITY_REQUIRED` | 创建 root 或领取交接 session，然后在每个认证调用中携带返回的 identity。 |
 | `INVALID_IDENTITY` | 若同一 ChatGPT 对话因中断变 stale，使用旧 sessionToken 调用 session_inherit 恢复原 session；若是 release/revoke/handoff，则从 TUI 获取新 claimCode。不要为同一未完成任务新建 root。 |
-| `CHECKPOINT_REQUIRED` | 先调用 `session_checkpoint`，再继续普通工作。 |
+| `CHECKPOINT_REQUIRED` | 立即调用 `session_checkpoint`。`off` 模式可省略 nextCalls 并按普通流程继续；增强模式按 discovery 声明提供准确数量，并立即执行返回的 nextCall。 |
+| `CONTINUATION_PLAN_REQUIRED` | 查看设置页的长任务 Harness：`adaptive` 接受 1–3 项，`next-call` 需要 1 项，`lookahead-3` 需要 3 项；切换后重新 discovery 即可，静态 OpenAPI schema 不需要重新导入。 |
+| `NEXT_CALL_REQUIRED` | 执行返回的准确 nextCall；只有计划确实失效时，才能用 replanReason 和完整替代计划重新 checkpoint。 |
+| 工具返回 `status=running` | 操作仍在本机继续。使用 taskId 调用 `task_poll`，直到 completed、failed 或 timeout；不能把快速返回当成任务完成。 |
 | `CHILD_REVIEW_REQUIRED` | 检查返回的子项总结、消息和事件；完成或取消全部子项。 |
 | Schema URL 无法访问 | 确认 Lite 和隧道都在运行，然后在浏览器打开 `https://你的域名/health` 和 `/openapi.json`。 |
 | HTTP 401 | 重新把 Lite **Actions token** 填为 API Key → Bearer；不要使用 Apps connector key。 |
